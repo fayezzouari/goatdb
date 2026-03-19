@@ -52,11 +52,11 @@ func (v *Vector) dotProduct(other *Vector) float32 {
 	return s0 + s1 + s2 + s3
 }
 
-func manhattan(v1 []float32, v2 []float32) float32 {
+func (v *Vector) manhattan(other *Vector) float32 {
 	distance := float32(0)
-	n := len(v1)
+	n := len(v.embeddings)
 	for i := 0; i < n; i++ {
-		distance += float32(math.Abs(float64(v1[i] - v2[i])))
+		distance += float32(math.Abs(float64(v.embeddings[i] - other.embeddings[i])))
 	}
 	return distance
 }
