@@ -23,11 +23,11 @@ func (v *Vector) cosine(other *Vector) float32 {
 	return 1 - (dot / (float32(math.Sqrt(float64(normV1))) * float32(math.Sqrt(float64(normV2)))))
 }
 
-func euclidean(v1 []float32, v2 []float32) float32 {
+func (v *Vector) euclidean(other *Vector) float32 {
 	distance := float32(0)
-	n := len(v1)
+	n := len(v.embeddings)
 	for i := 0; i < n; i++ {
-		diff := v1[i] - v2[i]
+		diff := v.embeddings[i] - other.embeddings[i]
 		distance += diff * diff
 	}
 	return float32(math.Sqrt(float64(distance)))
