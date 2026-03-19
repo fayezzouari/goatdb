@@ -15,9 +15,16 @@ func (c *Collection) AddVector(id string, vector Vector) {
 
 func (c *Collection) GetVector(id string) (Vector, bool) {
 	vector, exists := c.vectors[id]
+	if !exists {
+		return Vector{}, false
+	}
 	return vector, exists
 }
 
-func (c *Collection) DeleteVector(id string) {
+func (c *Collection) DeleteVector(id string) bool {
+	if _, exists := c.vectors[id]; !exists {
+		return false
+	}
 	delete(c.vectors, id)
+	return true
 }
