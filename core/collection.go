@@ -1,13 +1,21 @@
 package core
 
-type DistanceMetruc string
+import "container/heap"
+
+type DistanceMetric string
 
 const (
-	Cosine     DistanceMetruc = "cosine"
-	Euclidean  DistanceMetruc = "euclidean"
-	DotProduct DistanceMetruc = "dot_product"
-	Manhattan  DistanceMetruc = "manhattan"
+	Cosine     DistanceMetric = "cosine"
+	Euclidean  DistanceMetric = "euclidean"
+	DotProduct DistanceMetric = "dot_product"
+	Manhattan  DistanceMetric = "manhattan"
 )
+
+func (h resultHeap) Len() int           { return len(h) }
+func (h resultHeap) Less(i, j int) bool { return h[i].Distance > h[j].Distance }
+func (h resultHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *resultHeap) Push(x any)        { *h = append(*h, x.(SearchResult)) }
+func (h *resultHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 type SearchResult struct {
 	id       string
@@ -15,12 +23,14 @@ type SearchResult struct {
 	vector   Vector
 }
 
+type resultHeap []SearchResult
+
 type Collection struct {
 	id             int
 	name           string
 	index          string
 	vectors        map[string]*Vector
-	distanceMetric DistanceMetruc
+	distanceMetric DistanceMetric
 	dim            int
 }
 
@@ -51,9 +61,11 @@ func (c *Collection) Search(query Vector, topK int) []SearchResult {
 	if c.dim != len(query.embeddings) {
 		panic("Query vector dimension does not match collection dimension")
 	}
-	results := make([]SearchResult, 0, len(c.vectors))
+	h := &resultHeap{}
+	heap.Init(h)
+	distance := float32(0)
+
 	for id := range c.vectors {
-		var distance float32
 		switch c.distanceMetric {
 		case Cosine:
 			distance = query.cosine(c.vectors[id])
@@ -66,7 +78,13 @@ func (c *Collection) Search(query Vector, topK int) []SearchResult {
 		default:
 			panic("Unsupported distance metric")
 		}
-		results = append(results, SearchResult{id: id, Distance: distance})
+		if h.Len() < topK {
+			heap.Push(h, SearchResult{id: id, Distance: distance})
+		} else if distance < (*h)[0].Distance {
+			heap.Pop(h)
+			heap.Push(h, SearchResult{id: id, Distance: distance})
+		}
+
 	}
-	return results
+	return []SearchResult(*h)
 }
