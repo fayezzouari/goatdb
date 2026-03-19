@@ -12,6 +12,13 @@ func cosine(v1 []float32, v2 []float32) float32 {
 }
 
 func euclidean(v1 []float32, v2 []float32) float32 {
+	distance := float32(0)
+	n := len(v1)
+	for i := 0; i < n; i++ {
+		diff := v1[i] - v2[i]
+		distance += diff * diff
+	}
+	return float32(math.Sqrt(float64(distance)))
 }
 
 func dotProduct(v1 []float32, v2 []float32) float32 {
