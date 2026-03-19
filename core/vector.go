@@ -8,15 +8,15 @@ type Vector struct {
 	metadata   map[string]any
 }
 
-func cosine(v1 []float32, v2 []float32) float32 {
+func (v *Vector) cosine(other *Vector) float32 {
 	normV1 := float32(0)
 	normV2 := float32(0)
-	n := len(v1)
+	n := len(v.embeddings)
 	for i := 0; i < n; i++ {
-		normV1 += v1[i] * v1[i]
-		normV2 += v2[i] * v2[i]
+		normV1 += v.embeddings[i] * v.embeddings[i]
+		normV2 += other.embeddings[i] * other.embeddings[i]
 	}
-	dot := dotProduct(v1, v2)
+	dot := dotProduct(v.embeddings, other.embeddings)
 	if normV1 == 0 || normV2 == 0 {
 		return 0
 	}
