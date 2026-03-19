@@ -35,7 +35,7 @@ func (h *resultHeap) Push(x any)        { *h = append(*h, x.(SearchResult)) }
 func (h *resultHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 func (c *Collection) AddVector(id string, vector Vector) {
-	if c.dim != len(vector.embeddings) {
+	if c.dim != len(vector.Embeddings) {
 		panic("Vector dimension does not match collection dimension")
 	}
 	c.vectors[id] = &vector
@@ -58,7 +58,7 @@ func (c *Collection) DeleteVector(id string) bool {
 }
 
 func (c *Collection) Search(query Vector, topK int) []SearchResult {
-	if c.dim != len(query.embeddings) {
+	if c.dim != len(query.Embeddings) {
 		panic("Query vector dimension does not match collection dimension")
 	}
 	h := &resultHeap{}
