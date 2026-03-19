@@ -33,21 +33,21 @@ func (v *Vector) euclidean(other *Vector) float32 {
 	return float32(math.Sqrt(float64(distance)))
 }
 
-func dotProduct(v1 []float32, v2 []float32) float32 {
-	if len(v1) != len(v2) {
+func (v *Vector) dotProduct(other *Vector) float32 {
+	if len(v.embeddings) != len(other.embeddings) {
 		panic("Vectors must be of the same length")
 	}
-	n := len(v1)
+	n := len(v.embeddings)
 	var s0, s1, s2, s3 float32
 	i := 0
 	for ; i <= n-8; i += 8 {
-		s0 += v1[i+0]*v2[i+0] + v1[i+1]*v2[i+1]
-		s1 += v1[i+2]*v2[i+2] + v1[i+3]*v2[i+3]
-		s2 += v1[i+4]*v2[i+4] + v1[i+5]*v2[i+5]
-		s3 += v1[i+6]*v2[i+6] + v1[i+7]*v2[i+7]
+		s0 += v.embeddings[i+0]*other.embeddings[i+0] + v.embeddings[i+1]*other.embeddings[i+1]
+		s1 += v.embeddings[i+2]*other.embeddings[i+2] + v.embeddings[i+3]*other.embeddings[i+3]
+		s2 += v.embeddings[i+4]*other.embeddings[i+4] + v.embeddings[i+5]*other.embeddings[i+5]
+		s3 += v.embeddings[i+6]*other.embeddings[i+6] + v.embeddings[i+7]*other.embeddings[i+7]
 	}
 	for ; i < n; i++ {
-		s0 += v1[i] * v2[i]
+		s0 += v.embeddings[i] * other.embeddings[i]
 	}
 	return s0 + s1 + s2 + s3
 }
