@@ -16,7 +16,7 @@ func (v *Vector) cosine(other *Vector) float32 {
 		normV1 += v.embeddings[i] * v.embeddings[i]
 		normV2 += other.embeddings[i] * other.embeddings[i]
 	}
-	dot := dotProduct(v.embeddings, other.embeddings)
+	dot := v.dotProduct(other)
 	if normV1 == 0 || normV2 == 0 {
 		return 0
 	}
