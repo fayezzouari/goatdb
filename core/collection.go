@@ -22,7 +22,7 @@ type resultHeap []SearchResult
 type Collection struct {
 	id             int
 	name           string
-	index          string
+	index          Index
 	vectors        map[string]*Vector
 	distanceMetric DistanceMetric
 	dim            int
