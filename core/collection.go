@@ -1,5 +1,14 @@
 package core
 
+type DistanceMetruc string
+
+const (
+	Cosine     DistanceMetruc = "cosine"
+	Euclidean  DistanceMetruc = "euclidean"
+	DotProduct DistanceMetruc = "dot_product"
+	Manhattan  DistanceMetruc = "manhattan"
+)
+
 type Collection struct {
 	id             int
 	name           string
