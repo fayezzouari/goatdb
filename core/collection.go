@@ -9,6 +9,12 @@ const (
 	Manhattan  DistanceMetruc = "manhattan"
 )
 
+type SearchResult struct {
+	id       string
+	Distance float32
+	vector   Vector
+}
+
 type Collection struct {
 	id             int
 	name           string
