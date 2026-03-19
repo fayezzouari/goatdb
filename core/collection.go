@@ -10,6 +10,9 @@ type Collection struct {
 }
 
 func (c *Collection) AddVector(id string, vector Vector) {
+	if c.dim != len(vector.embeddings) {
+		panic("Vector dimension does not match collection dimension")
+	}
 	c.vectors[id] = vector
 }
 
