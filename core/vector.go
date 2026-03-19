@@ -9,6 +9,18 @@ type Vector struct {
 }
 
 func cosine(v1 []float32, v2 []float32) float32 {
+	normV1 := float32(0)
+	normV2 := float32(0)
+	n := len(v1)
+	for i := 0; i < n; i++ {
+		normV1 += v1[i] * v1[i]
+		normV2 += v2[i] * v2[i]
+	}
+	dot := dotProduct(v1, v2)
+	if normV1 == 0 || normV2 == 0 {
+		return 0
+	}
+	return 1 - (dot / (float32(math.Sqrt(float64(normV1))) * float32(math.Sqrt(float64(normV2)))))
 }
 
 func euclidean(v1 []float32, v2 []float32) float32 {
