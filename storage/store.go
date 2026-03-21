@@ -153,6 +153,22 @@ func (s *Store) LoadAll() ([]StoredVector, error) {
 	return result, nil
 }
 
+func (s *Store) LoadEmbeddings() ([]StoredVector, error) {
+	ids, slots, err := s.meta.AllSlots()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]StoredVector, 0, len(ids))
+	for i, id := range ids {
+		emb, ok := s.vectors.Read(int(slots[i]))
+		if !ok {
+			continue
+		}
+		result = append(result, StoredVector{Id: id, Embeddings: emb})
+	}
+	return result, nil
+}
+
 func (s *Store) Close() error {
 	s.wal.Close()
 	s.vectors.Close()

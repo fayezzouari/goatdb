@@ -60,7 +60,7 @@ func (l *LSHIndex) hashVec(t lshTable, v []float32) uint64 {
 	return h
 }
 
-func (l *LSHIndex) AddVector(_ string, id string, vector core.Vector) {
+func (l *LSHIndex) AddVector(id string, vector core.Vector) {
 	l.vectors[id] = vector
 	for i := range l.tables {
 		h := l.hashVec(l.tables[i], vector.Embeddings)
@@ -68,12 +68,12 @@ func (l *LSHIndex) AddVector(_ string, id string, vector core.Vector) {
 	}
 }
 
-func (l *LSHIndex) GetVector(_ string, id string) (core.Vector, bool) {
+func (l *LSHIndex) GetVector(id string) (core.Vector, bool) {
 	v, ok := l.vectors[id]
 	return v, ok
 }
 
-func (l *LSHIndex) DeleteVector(_ string, id string) bool {
+func (l *LSHIndex) DeleteVector(id string) bool {
 	if _, exists := l.vectors[id]; !exists {
 		return false
 	}
@@ -92,7 +92,7 @@ func (l *LSHIndex) DeleteVector(_ string, id string) bool {
 	return true
 }
 
-func (l *LSHIndex) Search(_ string, query core.Vector, topK int) []core.SearchResult {
+func (l *LSHIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	seen := make(map[string]bool)
 	var candidates []string
 	for i := range l.tables {

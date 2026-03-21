@@ -2,9 +2,9 @@ package storage
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 
+	msgpack "github.com/shamaton/msgpack/v2"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -86,7 +86,7 @@ func (m *MetaStore) GetSlot(id string) (uint32, error) {
 }
 
 func (m *MetaStore) PutMeta(id string, meta map[string]any) error {
-	data, err := json.Marshal(meta)
+	data, err := msgpack.Marshal(meta)
 	if err != nil {
 		return err
 	}
@@ -102,7 +102,7 @@ func (m *MetaStore) GetMeta(id string) (map[string]any, error) {
 		if raw == nil {
 			return nil
 		}
-		return json.Unmarshal(raw, &result)
+		return msgpack.Unmarshal(raw, &result)
 	})
 	return result, err
 }
