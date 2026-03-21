@@ -93,6 +93,17 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 	return col, nil
 }
 
+func (db *Database) ListCollections() []string {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	names := make([]string, 0, len(db.collections))
+	for name := range db.collections {
+		names = append(names, name)
+	}
+	return names
+}
+
 func (db *Database) GetCollection(name string) (*Collection, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
