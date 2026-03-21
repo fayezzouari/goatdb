@@ -2,7 +2,9 @@ package index
 
 import (
 	"container/heap"
+	"encoding/gob"
 	"math/rand"
+	"os"
 
 	"github.com/fayez/goatdb/core"
 )
@@ -117,4 +119,68 @@ func (l *LSHIndex) Search(_ string, query core.Vector, topK int) []core.SearchRe
 		}
 	}
 	return []core.SearchResult(*rh)
+}
+
+type lshState struct {
+	Dim            int
+	L              int
+	K              int
+	DistanceMetric core.DistanceMetric
+	Hyperplanes    [][][]float32
+	Buckets        []map[uint64][]string
+	Vectors        map[string][]float32
+}
+
+func (l *LSHIndex) Save(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	hps := make([][][]float32, l.L)
+	buckets := make([]map[uint64][]string, l.L)
+	for i, t := range l.tables {
+		hps[i] = t.hyperplanes
+		buckets[i] = t.buckets
+	}
+	vecs := make(map[string][]float32, len(l.vectors))
+	for id, v := range l.vectors {
+		vecs[id] = v.Embeddings
+	}
+	return gob.NewEncoder(file).Encode(lshState{
+		Dim:            l.dim,
+		L:              l.L,
+		K:              l.K,
+		DistanceMetric: l.distanceMetric,
+		Hyperplanes:    hps,
+		Buckets:        buckets,
+		Vectors:        vecs,
+	})
+}
+
+func (l *LSHIndex) Load(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var s lshState
+	if err := gob.NewDecoder(file).Decode(&s); err != nil {
+		return err
+	}
+	l.dim = s.Dim
+	l.L = s.L
+	l.K = s.K
+	l.distanceMetric = s.DistanceMetric
+	l.tables = make([]lshTable, s.L)
+	for i := range l.tables {
+		l.tables[i] = lshTable{hyperplanes: s.Hyperplanes[i], buckets: s.Buckets[i]}
+	}
+	l.vectors = make(map[string]core.Vector, len(s.Vectors))
+	for id, emb := range s.Vectors {
+		l.vectors[id] = core.Vector{Embeddings: emb}
+	}
+	return nil
 }
