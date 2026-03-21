@@ -2,8 +2,10 @@ package index
 
 import (
 	"container/heap"
+	"encoding/gob"
 	"math"
 	"math/rand"
+	"os"
 
 	"github.com/fayez/goatdb/core"
 )
@@ -259,4 +261,78 @@ func (h *HNSWIndex) Search(_ string, query core.Vector, topK int) []core.SearchR
 		})
 	}
 	return results
+}
+
+type hnswNodeState struct {
+	Embeddings  []float32
+	Connections [][]string
+}
+
+type hnswState struct {
+	Dim            int
+	M              int
+	EfConstruction int
+	Ef             int
+	ML             float64
+	DistanceMetric core.DistanceMetric
+	EntryPoint     string
+	MaxLayer       int
+	Nodes          map[string]hnswNodeState
+}
+
+func (h *HNSWIndex) Save(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	nodes := make(map[string]hnswNodeState, len(h.nodes))
+	for id, node := range h.nodes {
+		nodes[id] = hnswNodeState{
+			Embeddings:  node.vector.Embeddings,
+			Connections: node.connections,
+		}
+	}
+	return gob.NewEncoder(file).Encode(hnswState{
+		Dim:            h.dim,
+		M:              h.M,
+		EfConstruction: h.efConstruction,
+		Ef:             h.ef,
+		ML:             h.mL,
+		DistanceMetric: h.distanceMetric,
+		EntryPoint:     h.entryPoint,
+		MaxLayer:       h.maxLayer,
+		Nodes:          nodes,
+	})
+}
+
+func (h *HNSWIndex) Load(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var s hnswState
+	if err := gob.NewDecoder(file).Decode(&s); err != nil {
+		return err
+	}
+	h.dim = s.Dim
+	h.M = s.M
+	h.efConstruction = s.EfConstruction
+	h.ef = s.Ef
+	h.mL = s.ML
+	h.distanceMetric = s.DistanceMetric
+	h.entryPoint = s.EntryPoint
+	h.maxLayer = s.MaxLayer
+	h.nodes = make(map[string]*hnswNode, len(s.Nodes))
+	for id, ns := range s.Nodes {
+		h.nodes[id] = &hnswNode{
+			id:          id,
+			vector:      core.Vector{Embeddings: ns.Embeddings},
+			connections: ns.Connections,
+		}
+	}
+	return nil
 }
