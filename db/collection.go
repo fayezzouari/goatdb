@@ -87,6 +87,41 @@ func (c *Collection) GetVector(id string) (core.Vector, bool) {
 	return core.Vector{Embeddings: emb, Metadata: meta}, true
 }
 
+func (c *Collection) UpdateVector(id string, vector core.Vector) error {
+	if c.dim != len(vector.Embeddings) {
+		return fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(vector.Embeddings))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.store.Update(id, vector.Embeddings, vector.Metadata); err != nil {
+		return err
+	}
+	c.index.DeleteVector(id)
+	c.index.AddVector(id, core.Vector{Embeddings: vector.Embeddings})
+	return nil
+}
+
+func (c *Collection) Train() error {
+	t, ok := c.index.(core.Trainable)
+	if !ok {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	svecs, err := c.store.LoadEmbeddings()
+	if err != nil {
+		return err
+	}
+	vectors := make([]core.Vector, len(svecs))
+	for i, sv := range svecs {
+		vectors[i] = core.Vector{Embeddings: sv.Embeddings}
+	}
+	t.Train(vectors)
+	return nil
+}
+
 func (c *Collection) DeleteVector(id string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
