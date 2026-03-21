@@ -12,15 +12,15 @@ import (
 )
 
 type collectionConfig struct {
-	Name      string             `json:"name"`
-	Dim       int                `json:"dim"`
+	Name      string              `json:"name"`
+	Dim       int                 `json:"dim"`
 	Metric    core.DistanceMetric `json:"metric"`
-	IndexType string             `json:"index_type"`
+	IndexType string              `json:"index_type"`
 }
 
 type Database struct {
 	dir         string
-	collections map[string]*core.Collection
+	collections map[string]*Collection
 	mu          sync.RWMutex
 }
 
@@ -31,7 +31,7 @@ func Open(dir string) (*Database, error) {
 
 	db := &Database{
 		dir:         dir,
-		collections: make(map[string]*core.Collection),
+		collections: make(map[string]*Collection),
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -51,7 +51,7 @@ func Open(dir string) (*Database, error) {
 		if err != nil {
 			return nil, err
 		}
-		col, err := core.NewCollection(cfg.Name, cfg.Dim, dir, idx)
+		col, err := newCollection(cfg.Name, cfg.Dim, dir, idx)
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +61,7 @@ func Open(dir string) (*Database, error) {
 	return db, nil
 }
 
-func (db *Database) CreateCollection(name string, dim int, metric core.DistanceMetric, indexType string) (*core.Collection, error) {
+func (db *Database) CreateCollection(name string, dim int, metric core.DistanceMetric, indexType string) (*Collection, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -84,7 +84,7 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 		return nil, err
 	}
 
-	col, err := core.NewCollection(name, dim, db.dir, idx)
+	col, err := newCollection(name, dim, db.dir, idx)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 	return col, nil
 }
 
-func (db *Database) GetCollection(name string) (*core.Collection, error) {
+func (db *Database) GetCollection(name string) (*Collection, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
