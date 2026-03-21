@@ -52,6 +52,21 @@ func (v *Vector) dotProduct(other *Vector) float32 {
 	return s0 + s1 + s2 + s3
 }
 
+func (v *Vector) Distance(other *Vector, metric DistanceMetric) float32 {
+	switch metric {
+	case Cosine:
+		return v.cosine(other)
+	case Euclidean:
+		return v.euclidean(other)
+	case DotProduct:
+		return v.dotProduct(other)
+	case Manhattan:
+		return v.manhattan(other)
+	default:
+		panic("unsupported distance metric")
+	}
+}
+
 func (v *Vector) manhattan(other *Vector) float32 {
 	distance := float32(0)
 	n := len(v.Embeddings)
