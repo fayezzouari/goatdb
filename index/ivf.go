@@ -2,8 +2,10 @@ package index
 
 import (
 	"container/heap"
+	"encoding/gob"
 	"math"
 	"math/rand"
+	"os"
 
 	"github.com/fayez/goatdb/core"
 )
@@ -154,4 +156,66 @@ func (idx *IVFIndex) Search(_ string, query core.Vector, topK int) []core.Search
 		}
 	}
 	return []core.SearchResult(*rh)
+}
+
+type ivfState struct {
+	Dim            int
+	NClusters      int
+	NProbe         int
+	DistanceMetric core.DistanceMetric
+	Centroids      [][]float32
+	Trained        bool
+	Lists          []map[string][]float32
+}
+
+func (idx *IVFIndex) Save(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	lists := make([]map[string][]float32, len(idx.lists))
+	for i, list := range idx.lists {
+		lists[i] = make(map[string][]float32, len(list))
+		for id, v := range list {
+			lists[i][id] = v.Embeddings
+		}
+	}
+	return gob.NewEncoder(file).Encode(ivfState{
+		Dim:            idx.dim,
+		NClusters:      idx.nClusters,
+		NProbe:         idx.nProbe,
+		DistanceMetric: idx.distanceMetric,
+		Centroids:      idx.centroids,
+		Trained:        idx.trained,
+		Lists:          lists,
+	})
+}
+
+func (idx *IVFIndex) Load(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var s ivfState
+	if err := gob.NewDecoder(file).Decode(&s); err != nil {
+		return err
+	}
+	idx.dim = s.Dim
+	idx.nClusters = s.NClusters
+	idx.nProbe = s.NProbe
+	idx.distanceMetric = s.DistanceMetric
+	idx.centroids = s.Centroids
+	idx.trained = s.Trained
+	idx.lists = make([]map[string]core.Vector, len(s.Lists))
+	for i, list := range s.Lists {
+		idx.lists[i] = make(map[string]core.Vector, len(list))
+		for id, emb := range list {
+			idx.lists[i][id] = core.Vector{Embeddings: emb}
+		}
+	}
+	return nil
 }
