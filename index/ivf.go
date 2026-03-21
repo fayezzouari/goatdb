@@ -94,15 +94,16 @@ func l2sq(a, b []float32) float32 {
 	return d
 }
 
-func (idx *IVFIndex) AddVector(_ string, id string, vector core.Vector) {
+func (idx *IVFIndex) AddVector(id string, vector core.Vector) {
 	if !idx.trained {
-		panic("IVFIndex must be trained before adding vectors")
+		idx.lists[0][id] = vector
+		return
 	}
 	c := idx.nearestCentroid(vector.Embeddings)
 	idx.lists[c][id] = vector
 }
 
-func (idx *IVFIndex) GetVector(_ string, id string) (core.Vector, bool) {
+func (idx *IVFIndex) GetVector(id string) (core.Vector, bool) {
 	for _, list := range idx.lists {
 		if v, ok := list[id]; ok {
 			return v, true
@@ -111,7 +112,7 @@ func (idx *IVFIndex) GetVector(_ string, id string) (core.Vector, bool) {
 	return core.Vector{}, false
 }
 
-func (idx *IVFIndex) DeleteVector(_ string, id string) bool {
+func (idx *IVFIndex) DeleteVector(id string) bool {
 	for _, list := range idx.lists {
 		if _, ok := list[id]; ok {
 			delete(list, id)
@@ -121,7 +122,7 @@ func (idx *IVFIndex) DeleteVector(_ string, id string) bool {
 	return false
 }
 
-func (idx *IVFIndex) Search(_ string, query core.Vector, topK int) []core.SearchResult {
+func (idx *IVFIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	type centDist struct {
 		i    int
 		dist float32
