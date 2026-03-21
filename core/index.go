@@ -11,3 +11,7 @@ type Persistable interface {
 	Save(path string) error
 	Load(path string) error
 }
+
+type Trainable interface {
+	Train(vectors []Vector)
+}
