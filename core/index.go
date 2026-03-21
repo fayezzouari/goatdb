@@ -1,10 +1,13 @@
 package core
 
 type Index interface {
-	AddVector(collectionName string, id string, vector Vector)
-	GetVector(collectionName string, id string) (Vector, bool)
-	DeleteVector(collectionName string, id string) bool
-	Search(collectionName string, query Vector, topK int) []SearchResult
+	AddVector(id string, vector Vector)
+	GetVector(id string) (Vector, bool)
+	DeleteVector(id string) bool
+	Search(query Vector, topK int) []SearchResult
+}
+
+type Persistable interface {
 	Save(path string) error
 	Load(path string) error
 }
