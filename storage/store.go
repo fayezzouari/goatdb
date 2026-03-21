@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type StoredVector struct {
@@ -16,6 +17,7 @@ type Store struct {
 	vectors *VectorStore
 	meta    *MetaStore
 	wal     *WAL
+	mu      sync.RWMutex
 }
 
 func Open(dir string, dim int) (*Store, error) {
@@ -64,6 +66,13 @@ func (s *Store) replay(entries []walEntry) error {
 			if err := s.meta.PutSlot(e.id, e.slot); err != nil {
 				return err
 			}
+		case opUpdate:
+			if _, err := s.meta.GetSlot(e.id); err != nil {
+				continue
+			}
+			if err := s.vectors.Write(int(e.slot), e.embeddings); err != nil {
+				return err
+			}
 		case opDelete:
 			s.vectors.Delete(int(e.slot))
 			s.meta.Delete(e.id)
@@ -73,6 +82,9 @@ func (s *Store) replay(entries []walEntry) error {
 }
 
 func (s *Store) Add(id string, embeddings []float32, metadata map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	slot, err := s.meta.AllocSlot(id)
 	if err != nil {
 		return err
@@ -92,7 +104,33 @@ func (s *Store) Add(id string, embeddings []float32, metadata map[string]any) er
 	return s.meta.PutMeta(id, metadata)
 }
 
+func (s *Store) Update(id string, embeddings []float32, metadata map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	slot, err := s.meta.GetSlot(id)
+	if err != nil {
+		return fmt.Errorf("vector %q not found", id)
+	}
+
+	if err := s.wal.Append(opUpdate, id, slot, embeddings); err != nil {
+		return err
+	}
+	if err := s.wal.Sync(); err != nil {
+		return err
+	}
+
+	if err := s.vectors.Write(int(slot), embeddings); err != nil {
+		return err
+	}
+
+	return s.meta.PutMeta(id, metadata)
+}
+
 func (s *Store) Get(id string) ([]float32, map[string]any, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	slot, err := s.meta.GetSlot(id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vector %q not found", id)
@@ -112,6 +150,9 @@ func (s *Store) Get(id string) ([]float32, map[string]any, error) {
 }
 
 func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	slot, err := s.meta.GetSlot(id)
 	if err != nil {
 		return fmt.Errorf("vector %q not found", id)
@@ -129,6 +170,9 @@ func (s *Store) Delete(id string) error {
 }
 
 func (s *Store) LoadAll() ([]StoredVector, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	ids, slots, err := s.meta.AllSlots()
 	if err != nil {
 		return nil, err
@@ -144,20 +188,20 @@ func (s *Store) LoadAll() ([]StoredVector, error) {
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, StoredVector{
-			Id:         id,
-			Embeddings: emb,
-			Metadata:   meta,
-		})
+		result = append(result, StoredVector{Id: id, Embeddings: emb, Metadata: meta})
 	}
 	return result, nil
 }
 
 func (s *Store) LoadEmbeddings() ([]StoredVector, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	ids, slots, err := s.meta.AllSlots()
 	if err != nil {
 		return nil, err
 	}
+
 	result := make([]StoredVector, 0, len(ids))
 	for i, id := range ids {
 		emb, ok := s.vectors.Read(int(slots[i]))
