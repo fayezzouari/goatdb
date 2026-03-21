@@ -96,7 +96,14 @@ func (vs *VectorStore) Write(slot int, embeddings []float32) error {
 		vs.data[off+i*4+3] = byte(bits >> 24)
 	}
 	vs.data[off+vs.dim*4] = 0
-	return unix.Msync(vs.data[off:off+vs.recordSize], unix.MS_SYNC)
+
+	pageSize := syscall.Getpagesize()
+	pageStart := (off / pageSize) * pageSize
+	pageEnd := ((off + vs.recordSize + pageSize - 1) / pageSize) * pageSize
+	if pageEnd > len(vs.data) {
+		pageEnd = len(vs.data)
+	}
+	return unix.Msync(vs.data[pageStart:pageEnd], unix.MS_SYNC)
 }
 
 func (vs *VectorStore) Read(slot int) ([]float32, bool) {
