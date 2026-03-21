@@ -4,6 +4,8 @@ import (
 	"math"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 const deletedFlag = byte(1)
@@ -94,7 +96,7 @@ func (vs *VectorStore) Write(slot int, embeddings []float32) error {
 		vs.data[off+i*4+3] = byte(bits >> 24)
 	}
 	vs.data[off+vs.dim*4] = 0
-	return nil
+	return unix.Msync(vs.data[off:off+vs.recordSize], unix.MS_SYNC)
 }
 
 func (vs *VectorStore) Read(slot int) ([]float32, bool) {
