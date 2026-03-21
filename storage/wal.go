@@ -12,6 +12,7 @@ type opType uint8
 const (
 	opInsert opType = 1
 	opDelete opType = 2
+	opUpdate opType = 3
 )
 
 type walEntry struct {
