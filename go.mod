@@ -8,3 +8,5 @@ require (
 	go.etcd.io/bbolt v1.3.11
 	golang.org/x/sys v0.29.0
 )
+
+require github.com/shamaton/msgpack/v2 v2.4.0
