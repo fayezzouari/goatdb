@@ -124,7 +124,7 @@ func selectNeighbors(candidates []candidate, M int) []candidate {
 	return candidates[:M]
 }
 
-func (h *HNSWIndex) AddVector(_ string, id string, vector core.Vector) {
+func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
 	node := &hnswNode{
 		id:          id,
@@ -196,7 +196,7 @@ func (h *HNSWIndex) AddVector(_ string, id string, vector core.Vector) {
 	}
 }
 
-func (h *HNSWIndex) GetVector(_ string, id string) (core.Vector, bool) {
+func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
 	node, ok := h.nodes[id]
 	if !ok {
 		return core.Vector{}, false
@@ -204,7 +204,7 @@ func (h *HNSWIndex) GetVector(_ string, id string) (core.Vector, bool) {
 	return node.vector, true
 }
 
-func (h *HNSWIndex) DeleteVector(_ string, id string) bool {
+func (h *HNSWIndex) DeleteVector(id string) bool {
 	node, exists := h.nodes[id]
 	if !exists {
 		return false
@@ -239,7 +239,7 @@ func (h *HNSWIndex) DeleteVector(_ string, id string) bool {
 	return true
 }
 
-func (h *HNSWIndex) Search(_ string, query core.Vector, topK int) []core.SearchResult {
+func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	if h.maxLayer == -1 {
 		return nil
 	}

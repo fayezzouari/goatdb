@@ -22,11 +22,11 @@ func NewFlatIndex(dim int, metric core.DistanceMetric) *FlatIndex {
 	}
 }
 
-func (f *FlatIndex) AddVector(_ string, id string, vector core.Vector) {
+func (f *FlatIndex) AddVector(id string, vector core.Vector) {
 	f.vectors[id] = vector.Embeddings
 }
 
-func (f *FlatIndex) GetVector(_ string, id string) (core.Vector, bool) {
+func (f *FlatIndex) GetVector(id string) (core.Vector, bool) {
 	emb, ok := f.vectors[id]
 	if !ok {
 		return core.Vector{}, false
@@ -34,7 +34,7 @@ func (f *FlatIndex) GetVector(_ string, id string) (core.Vector, bool) {
 	return core.Vector{Embeddings: emb}, true
 }
 
-func (f *FlatIndex) DeleteVector(_ string, id string) bool {
+func (f *FlatIndex) DeleteVector(id string) bool {
 	if _, ok := f.vectors[id]; !ok {
 		return false
 	}
@@ -42,7 +42,7 @@ func (f *FlatIndex) DeleteVector(_ string, id string) bool {
 	return true
 }
 
-func (f *FlatIndex) Search(_ string, query core.Vector, topK int) []core.SearchResult {
+func (f *FlatIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	rh := &resultHeap{}
 	heap.Init(rh)
 	for id, emb := range f.vectors {
