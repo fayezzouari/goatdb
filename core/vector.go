@@ -3,7 +3,6 @@ package core
 import "math"
 
 type Vector struct {
-	Id         int
 	Embeddings []float32
 	Metadata   map[string]any
 }
