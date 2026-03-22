@@ -84,6 +84,20 @@ func DistSlices(a, b []float32, metric DistanceMetric) float32 {
 	return va.Distance(&vb, metric)
 }
 
+// L2SqSlices returns the squared euclidean distance between a and b without
+// taking the square root — safe for comparison/ranking. Uses AVX2 when available.
+func L2SqSlices(a, b []float32) float32 {
+	if hasAVX2 && len(a) > 0 {
+		return l2SquaredAVX2(&a[0], &b[0], len(a))
+	}
+	var s float32
+	for i := range a {
+		d := a[i] - b[i]
+		s += d * d
+	}
+	return s
+}
+
 func (v *Vector) manhattan(other *Vector) float32 {
 	distance := float32(0)
 	n := len(v.Embeddings)

@@ -3,6 +3,7 @@ package core
 import (
 	"math"
 	"math/rand"
+	"sync"
 )
 
 type SQCodebook struct {
@@ -11,13 +12,23 @@ type SQCodebook struct {
 	Dim   int
 }
 
+const sqMaxScanVecs = 100_000
+
 func NewSQCodebook(vectors []Vector) *SQCodebook {
 	if len(vectors) == 0 {
 		return nil
 	}
+	scan := vectors
+	if len(scan) > sqMaxScanVecs {
+		scan = make([]Vector, sqMaxScanVecs)
+		perm := rand.Perm(len(vectors))[:sqMaxScanVecs]
+		for i, p := range perm {
+			scan[i] = vectors[p]
+		}
+	}
 	min := float32(math.MaxFloat32)
 	max := float32(-math.MaxFloat32)
-	for _, v := range vectors {
+	for _, v := range scan {
 		for _, x := range v.Embeddings {
 			if x < min {
 				min = x
@@ -104,9 +115,15 @@ type PQCodebook struct {
 	Centroids  []float32 // [NSubs * NCentroids * SubDim]
 }
 
+// pqMaxTrainVecs is the maximum number of vectors used to train the PQ codebook.
+// Codebook quality does not improve past ~100k samples, but training cost grows
+// linearly — subsampling keeps 1M+ datasets tractable.
+const pqMaxTrainVecs = 100_000
+
 // NewPQCodebook trains a PQ codebook from the given vectors.
 // nSubs must divide dim evenly. nCentroids is typically 256.
 // Requires at least nCentroids training vectors.
+// All subspaces are trained in parallel.
 func NewPQCodebook(vectors []Vector, nSubs, nCentroids int) *PQCodebook {
 	if len(vectors) < nCentroids {
 		return nil
@@ -115,11 +132,31 @@ func NewPQCodebook(vectors []Vector, nSubs, nCentroids int) *PQCodebook {
 	if dim%nSubs != 0 {
 		return nil
 	}
+
+	// Subsample if the dataset is large — shuffle-select without allocation.
+	train := vectors
+	if len(train) > pqMaxTrainVecs {
+		perm := rand.Perm(len(vectors))[:pqMaxTrainVecs]
+		train = make([]Vector, pqMaxTrainVecs)
+		for i, p := range perm {
+			train[i] = vectors[p]
+		}
+	}
+
 	subDim := dim / nSubs
 	centroids := make([]float32, nSubs*nCentroids*subDim)
+
+	// Train all subspaces in parallel — each subspace is independent.
+	var wg sync.WaitGroup
 	for m := 0; m < nSubs; m++ {
-		pqTrainSubspace(vectors, m, subDim, nCentroids, centroids[m*nCentroids*subDim:])
+		wg.Add(1)
+		go func(m int) {
+			defer wg.Done()
+			pqTrainSubspace(train, m, subDim, nCentroids, centroids[m*nCentroids*subDim:])
+		}(m)
 	}
+	wg.Wait()
+
 	return &PQCodebook{NSubs: nSubs, NCentroids: nCentroids, SubDim: subDim, Centroids: centroids}
 }
 
