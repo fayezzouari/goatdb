@@ -39,6 +39,15 @@ func (h *Handler) ListCollections(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]string{"collections": names})
 }
 
+func (h *Handler) GetCollection(w http.ResponseWriter, r *http.Request) {
+	col, err := h.DB.GetCollection(r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, col.Info())
+}
+
 func (h *Handler) DropCollection(w http.ResponseWriter, r *http.Request) {
 	if err := h.DB.DropCollection(r.PathValue("name")); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
