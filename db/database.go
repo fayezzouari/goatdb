@@ -51,7 +51,7 @@ func Open(dir string) (*Database, error) {
 		if err != nil {
 			return nil, err
 		}
-		col, err := newCollection(cfg.Name, cfg.Dim, dir, idx)
+		col, err := newCollection(cfg.Name, cfg.Dim, cfg.Metric, cfg.IndexType, dir, idx)
 		if err != nil {
 			return nil, err
 		}
@@ -84,7 +84,7 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 		return nil, err
 	}
 
-	col, err := newCollection(name, dim, db.dir, idx)
+	col, err := newCollection(name, dim, metric, indexType, db.dir, idx)
 	if err != nil {
 		return nil, err
 	}
