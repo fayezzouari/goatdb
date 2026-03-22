@@ -145,11 +145,11 @@ func createIndex(indexType string, dim int, metric core.DistanceMetric) (core.In
 	case "flat":
 		return index.NewFlatIndex(dim, metric), nil
 	case "lsh":
-		return index.NewLSHIndex(dim, 10, 8, metric), nil
+		return index.NewLSHIndex(dim, 20, 8, metric), nil
 	case "ivf":
-		return index.NewIVFIndex(dim, 100, 10, metric), nil
+		return index.NewIVFIndex(dim, 100, 20, metric), nil
 	case "hnsw":
-		return index.NewHNSWIndex(dim, 16, 200, 50, metric), nil
+		return index.NewHNSWIndex(dim, 16, 200, 128, metric), nil
 	default:
 		return nil, fmt.Errorf("unknown index type: %q", indexType)
 	}
