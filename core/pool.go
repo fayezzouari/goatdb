@@ -53,3 +53,7 @@ func (p *VectorPool) ForEach(fn func(idx int32, emb []float32)) {
 func (p *VectorPool) Len() int {
 	return p.slots - len(p.free)
 }
+
+func (p *VectorPool) Slots() int {
+	return p.slots
+}
