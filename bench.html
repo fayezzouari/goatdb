@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GoatDB Benchmark</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;padding:24px}
+h1{font-size:1.5rem;font-weight:700;margin-bottom:4px}
+p.sub{color:#94a3b8;font-size:.85rem;margin-bottom:32px}
+h2{font-size:1rem;font-weight:600;color:#94a3b8;margin-bottom:12px;text-transform:uppercase;letter-spacing:.05em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(500px,1fr));gap:24px}
+.card{background:#1e2130;border:1px solid #2d3148;border-radius:12px;padding:20px}
+canvas{max-height:280px}
+.meta{font-size:.75rem;color:#64748b;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>GoatDB — ANN Benchmark Report</h1>
+<p class="sub">dim=128 &nbsp;|&nbsp; top-K=10 &nbsp;|&nbsp; queries=500 &nbsp;|&nbsp; 2026-03-22 16:18 UTC</p>
+
+<div class="grid">
+
+<div class="card">
+<h2>Recall@10 (%)</h2>
+<canvas id="recallChart"></canvas>
+<p class="meta">Higher is better. Measured against exact flat-index ground truth.</p>
+</div>
+
+<div class="card">
+<h2>QPS (queries / second)</h2>
+<canvas id="qpsChart"></canvas>
+<p class="meta">Higher is better. Derived from median per-query latency.</p>
+</div>
+
+<div class="card">
+<h2>P50 Latency (µs)</h2>
+<canvas id="p50Chart"></canvas>
+<p class="meta">Lower is better.</p>
+</div>
+
+<div class="card">
+<h2>P95 / P99 Latency (µs)</h2>
+<canvas id="tailChart"></canvas>
+<p class="meta">Lower is better.</p>
+</div>
+
+<div class="card">
+<h2>Build Time (ms)</h2>
+<canvas id="buildChart"></canvas>
+<p class="meta">Lower is better. Time to insert all vectors into the index.</p>
+</div>
+
+<div class="card">
+<h2>Recall vs QPS (n=10000)</h2>
+<canvas id="tradeoffChart"></canvas>
+<p class="meta">Upper-right is better. Each point is one index type.</p>
+</div>
+
+</div>
+
+<script>
+const COLORS = {
+  Flat:  '#60a5fa',
+  LSH:   '#34d399',
+  HNSW:  '#f472b6',
+  IVF:   '#fbbf24',
+};
+const SIZES  = [1000,5000,10000];
+const IDXS   = ["Flat","LSH","HNSW","IVF"];
+const DATA   = [{"index":"Flat","n":1000,"buildMs":0.00,"recallAt":100.00,"qps":7457.73,"p50Us":134.09,"p95Us":326.96,"p99Us":381.73},{"index":"LSH","n":1000,"buildMs":24.00,"recallAt":79.36,"qps":4056.99,"p50Us":246.49,"p95Us":505.40,"p99Us":688.16},{"index":"HNSW","n":1000,"buildMs":407.00,"recallAt":99.96,"qps":1878.96,"p50Us":532.21,"p95Us":1046.55,"p99Us":1306.12},{"index":"IVF","n":1000,"buildMs":55.00,"recallAt":77.30,"qps":12365.98,"p50Us":80.87,"p95Us":149.93,"p99Us":228.20},{"index":"Flat","n":5000,"buildMs":1.00,"recallAt":100.00,"qps":2277.11,"p50Us":439.15,"p95Us":1043.70,"p99Us":1962.84},{"index":"LSH","n":5000,"buildMs":63.00,"recallAt":83.96,"qps":1707.19,"p50Us":585.76,"p95Us":1195.36,"p99Us":1717.07},{"index":"HNSW","n":5000,"buildMs":4090.00,"recallAt":96.74,"qps":1593.93,"p50Us":627.38,"p95Us":1284.42,"p99Us":1827.05},{"index":"IVF","n":5000,"buildMs":274.00,"recallAt":73.14,"qps":4196.00,"p50Us":238.32,"p95Us":520.60,"p99Us":673.06},{"index":"Flat","n":10000,"buildMs":3.00,"recallAt":100.00,"qps":1177.78,"p50Us":849.06,"p95Us":1329.38,"p99Us":1971.01},{"index":"LSH","n":10000,"buildMs":123.00,"recallAt":86.38,"qps":801.25,"p50Us":1248.06,"p95Us":2471.44,"p99Us":3276.82},{"index":"HNSW","n":10000,"buildMs":10544.00,"recallAt":91.44,"qps":1224.69,"p50Us":816.53,"p95Us":1110.23,"p99Us":1375.32},{"index":"IVF","n":10000,"buildMs":522.00,"recallAt":71.84,"qps":2258.09,"p50Us":442.85,"p95Us":911.57,"p99Us":1194.29}];
+
+function col(idx){ return COLORS[idx] || '#888' }
+
+
+function val(idx, n, field){
+  const r = DATA.find(d => d.index===idx && d.n===n);
+  return r ? r[field] : 0;
+}
+
+const barOpts = (title) => ({
+  responsive:true,
+  plugins:{legend:{labels:{color:'#cbd5e1'}},tooltip:{mode:'index'}},
+  scales:{
+    x:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},
+    y:{ticks:{color:'#94a3b8'},grid:{color:'#2d3148'},title:{display:true,text:title,color:'#94a3b8'}}
+  }
+});
+
+function makeBarChart(id, field, title){
+  const labels = SIZES.map(n => n>=1000 ? n/1000+'k' : ''+n);
+  const datasets = IDXS.map(idx => ({
+    label: idx,
+    data: SIZES.map(n => val(idx, n, field)),
+    backgroundColor: col(idx)+'cc',
+    borderColor: col(idx),
+    borderWidth:1,
+    borderRadius:4,
+  }));
+  new Chart(document.getElementById(id), {
+    type:'bar', data:{labels, datasets}, options: barOpts(title)
+  });
+}
+
+makeBarChart('recallChart', 'recallAt', 'Recall (%)');
+makeBarChart('qpsChart',    'qps',      'QPS');
+makeBarChart('p50Chart',    'p50Us',    'µs');
+makeBarChart('buildChart',  'buildMs',  'ms');
+
+
+(function(){
+  const lastN =  10000 ;
+  const labels = IDXS;
+  const p95 = IDXS.map(idx => val(idx, lastN, 'p95Us'));
+  const p99 = IDXS.map(idx => val(idx, lastN, 'p99Us'));
+  new Chart(document.getElementById('tailChart'), {
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {label:'P95',data:p95,backgroundColor:'#818cf8cc',borderColor:'#818cf8',borderWidth:1,borderRadius:4},
+        {label:'P99',data:p99,backgroundColor:'#f43f5ecc',borderColor:'#f43f5e',borderWidth:1,borderRadius:4},
+      ]
+    },
+    options: barOpts('µs')
+  });
+})();
+
+
+(function(){
+  const lastN =  10000 ;
+  const datasets = IDXS.map(idx => ({
+    label: idx,
+    data: [{x: val(idx,lastN,'recallAt'), y: val(idx,lastN,'qps')}],
+    backgroundColor: col(idx)+'cc',
+    borderColor: col(idx),
+    pointRadius: 10,
+    pointHoverRadius: 13,
+  }));
+  new Chart(document.getElementById('tradeoffChart'), {
+    type:'scatter',
+    data:{datasets},
+    options:{
+      responsive:true,
+      plugins:{legend:{labels:{color:'#cbd5e1'}}},
+      scales:{
+        x:{title:{display:true,text:'Recall (%)',color:'#94a3b8'},ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},
+        y:{title:{display:true,text:'QPS',color:'#94a3b8'},ticks:{color:'#94a3b8'},grid:{color:'#2d3148'}},
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>
