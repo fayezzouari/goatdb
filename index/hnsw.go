@@ -53,6 +53,8 @@ type HNSWIndex struct {
 	pool           *core.VectorPool
 	codebook       *core.SQCodebook
 	sqPool         *core.Int8VectorPool
+	pqCodebook     *core.PQCodebook
+	pqPool         *core.PQPool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
@@ -75,6 +77,8 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 func (h *HNSWIndex) Train(vectors []core.Vector) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Scalar quantization (SQ): global min/max float32→int8.
 	cb := core.NewSQCodebook(vectors)
 	if cb == nil {
 		return
@@ -83,6 +87,26 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 	h.sqPool = core.NewInt8VectorPool(h.dim, max(h.pool.Slots(), 64))
 	for _, node := range h.nodes {
 		h.sqPool.Set(node.poolIdx, cb.Quantize(h.pool.Get(node.poolIdx)))
+	}
+
+	// Product quantization (PQ): split into subspaces, 256 centroids each.
+	// nSubs chosen so subDim=4 (fast per-subspace k-means); fall back to
+	// smaller divisor if dim is not divisible.
+	nSubs := h.dim / 4
+	if nSubs < 1 {
+		nSubs = 1
+	}
+	for nSubs > 1 && h.dim%nSubs != 0 {
+		nSubs--
+	}
+	pq := core.NewPQCodebook(vectors, nSubs, 256)
+	if pq == nil {
+		return
+	}
+	h.pqCodebook = pq
+	h.pqPool = core.NewPQPool(nSubs, max(h.pool.Slots(), 64))
+	for _, node := range h.nodes {
+		h.pqPool.Set(node.poolIdx, pq.Encode(h.pool.Get(node.poolIdx)))
 	}
 }
 
@@ -95,9 +119,9 @@ func (h *HNSWIndex) dist(a, b []float32) float32 {
 }
 
 // searchLayer runs the beam search at a single HNSW layer.
-// When queryInt8 is non-nil, uses the int8 approximate distance for candidate
-// scoring (phase 1). The caller re-ranks with exact float32 after this returns.
-func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
+// Priority for distance computation: PQ table (fastest) → SQ int8 → float32 exact.
+// The caller is responsible for float32 re-ranking after this returns.
+func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, distTable []float32, eps []candidate, ef, layer int) []candidate {
 	visited := make(map[string]bool, ef*2)
 
 	cands := &minHeap{}
@@ -126,9 +150,12 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candida
 			visited[nbID] = true
 			nb := h.nodes[nbID]
 			var d float32
-			if queryInt8 != nil {
+			switch {
+			case distTable != nil:
+				d = h.pqCodebook.DistPQ(h.pqPool.Get(nb.poolIdx), distTable)
+			case queryInt8 != nil:
 				d = h.codebook.DistInt8(queryInt8, h.sqPool.Get(nb.poolIdx))
-			} else {
+			default:
 				d = h.dist(query, h.pool.Get(nb.poolIdx))
 			}
 			f = (*W)[0]
@@ -187,6 +214,10 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		h.sqPool.Grow(int(poolIdx) + 1)
 		h.sqPool.Set(poolIdx, h.codebook.Quantize(vector.Embeddings))
 	}
+	if h.pqCodebook != nil {
+		h.pqPool.Grow(int(poolIdx) + 1)
+		h.pqPool.Set(poolIdx, h.pqCodebook.Encode(vector.Embeddings))
+	}
 
 	node := &hnswNode{
 		id:          id,
@@ -209,11 +240,15 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
+	var distTable []float32
+	if h.pqCodebook != nil {
+		distTable = h.pqCodebook.DistTable(q)
+	}
 
 	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(q, qInt8, distTable, ep, 1, layer)
 		ep = result[:1]
 	}
 
@@ -222,10 +257,10 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(q, qInt8, ep, h.efConstruction, layer)
+		candidates := h.searchLayer(q, qInt8, distTable, ep, h.efConstruction, layer)
 
 		// re-rank candidates with exact float32 distances before neighbor selection
-		if qInt8 != nil {
+		if distTable != nil || qInt8 != nil {
 			for i := range candidates {
 				candidates[i].dist = h.dist(q, h.pool.Get(h.nodes[candidates[i].id].poolIdx))
 			}
@@ -335,18 +370,22 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
+	var distTable []float32
+	if h.pqCodebook != nil {
+		distTable = h.pqCodebook.DistTable(q)
+	}
 
 	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(q, qInt8, distTable, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(q, qInt8, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(q, qInt8, distTable, ep, max(h.ef, topK), 0)
 
-	// phase 2: re-rank with exact float32 distances
-	if qInt8 != nil {
+	// final re-rank with exact float32 distances
+	if distTable != nil || qInt8 != nil {
 		for i := range candidates {
 			candidates[i].dist = h.dist(q, h.pool.Get(h.nodes[candidates[i].id].poolIdx))
 		}
@@ -381,6 +420,10 @@ type hnswState struct {
 	SQMin          float32
 	SQScale        float32
 	HasSQ          bool
+	PQNSubs        int
+	PQNCentroids   int
+	PQCentroids    []float32
+	HasPQ          bool
 }
 
 func (h *HNSWIndex) Save(path string) error {
@@ -417,6 +460,12 @@ func (h *HNSWIndex) Save(path string) error {
 		state.HasSQ = true
 		state.SQMin = h.codebook.Min
 		state.SQScale = h.codebook.Scale
+	}
+	if h.pqCodebook != nil {
+		state.HasPQ = true
+		state.PQNSubs = h.pqCodebook.NSubs
+		state.PQNCentroids = h.pqCodebook.NCentroids
+		state.PQCentroids = h.pqCodebook.Centroids
 	}
 	return gob.NewEncoder(file).Encode(state)
 }
@@ -458,6 +507,19 @@ func (h *HNSWIndex) Load(path string) error {
 		h.sqPool = core.NewInt8VectorPool(s.Dim, h.pool.Slots())
 		for _, node := range h.nodes {
 			h.sqPool.Set(node.poolIdx, h.codebook.Quantize(h.pool.Get(node.poolIdx)))
+		}
+	}
+	if s.HasPQ {
+		subDim := s.Dim / s.PQNSubs
+		h.pqCodebook = &core.PQCodebook{
+			NSubs:      s.PQNSubs,
+			NCentroids: s.PQNCentroids,
+			SubDim:     subDim,
+			Centroids:  s.PQCentroids,
+		}
+		h.pqPool = core.NewPQPool(s.PQNSubs, h.pool.Slots())
+		for _, node := range h.nodes {
+			h.pqPool.Set(node.poolIdx, h.pqCodebook.Encode(h.pool.Get(node.poolIdx)))
 		}
 	}
 	return nil
