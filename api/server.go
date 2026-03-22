@@ -12,16 +12,19 @@ import (
 )
 
 type Server struct {
-	httpSv *http.Server
+	httpSv  *http.Server
+	Metrics *middleware.Metrics
 }
 
 func NewServer(database *db.Database, addr string) *Server {
 	h := handlers.New(database)
+	m := &middleware.Metrics{}
 
 	mux := http.NewServeMux()
 
-	// Health
+	// Health & metrics
 	mux.HandleFunc("GET /health", health)
+	mux.HandleFunc("GET /metrics", m.Handler())
 
 	// Collections
 	mux.HandleFunc("POST /collections", h.CreateCollection)
@@ -40,8 +43,16 @@ func NewServer(database *db.Database, addr string) *Server {
 	mux.HandleFunc("POST /collections/{name}/search", h.Search)
 	mux.HandleFunc("POST /collections/{name}/train", h.Train)
 
-	handler := middleware.Logging(middleware.Recovery(middleware.MaxBody(mux)))
-	return &Server{httpSv: &http.Server{Addr: addr, Handler: handler}}
+	handler := m.Collect(middleware.Logging(middleware.Recovery(middleware.MaxBody(mux))))
+	return &Server{
+		httpSv:  &http.Server{Addr: addr, Handler: handler},
+		Metrics: m,
+	}
+}
+
+// Handler returns the HTTP handler for use in tests.
+func (s *Server) Handler() http.Handler {
+	return s.httpSv.Handler
 }
 
 func health(w http.ResponseWriter, r *http.Request) {
