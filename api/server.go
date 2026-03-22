@@ -9,6 +9,7 @@ import (
 	"github.com/fayez/goatdb/api/handlers"
 	"github.com/fayez/goatdb/api/middleware"
 	"github.com/fayez/goatdb/db"
+	"github.com/fayez/goatdb/web"
 )
 
 type Server struct {
@@ -21,6 +22,10 @@ func NewServer(database *db.Database, addr string) *Server {
 	m := &middleware.Metrics{}
 
 	mux := http.NewServeMux()
+
+	// Web UI
+	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
+	mux.Handle("GET /ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(web.FS))))
 
 	// Health & metrics
 	mux.HandleFunc("GET /health", health)
@@ -50,7 +55,6 @@ func NewServer(database *db.Database, addr string) *Server {
 	}
 }
 
-// Handler returns the HTTP handler for use in tests.
 func (s *Server) Handler() http.Handler {
 	return s.httpSv.Handler
 }
