@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -78,7 +79,10 @@ func (c *Collection) rebuildIndex() error {
 	return nil
 }
 
-func (c *Collection) AddVector(id string, vector core.Vector) error {
+func (c *Collection) AddVector(ctx context.Context, id string, vector core.Vector) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(vector.Embeddings) != c.dim {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(vector.Embeddings))
 	}
@@ -92,7 +96,10 @@ func (c *Collection) AddVector(id string, vector core.Vector) error {
 	return nil
 }
 
-func (c *Collection) AddVectors(vectors map[string]core.Vector) error {
+func (c *Collection) AddVectors(ctx context.Context, vectors map[string]core.Vector) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for id, v := range vectors {
 		if len(v.Embeddings) != c.dim {
 			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", id, c.dim, len(v.Embeddings))
@@ -110,7 +117,10 @@ func (c *Collection) AddVectors(vectors map[string]core.Vector) error {
 	return nil
 }
 
-func (c *Collection) GetVector(id string) (core.Vector, bool) {
+func (c *Collection) GetVector(ctx context.Context, id string) (core.Vector, bool) {
+	if err := ctx.Err(); err != nil {
+		return core.Vector{}, false
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -121,7 +131,10 @@ func (c *Collection) GetVector(id string) (core.Vector, bool) {
 	return core.Vector{Embeddings: emb, Metadata: meta}, true
 }
 
-func (c *Collection) UpdateVector(id string, vector core.Vector) error {
+func (c *Collection) UpdateVector(ctx context.Context, id string, vector core.Vector) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(vector.Embeddings) != c.dim {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(vector.Embeddings))
 	}
@@ -136,7 +149,10 @@ func (c *Collection) UpdateVector(id string, vector core.Vector) error {
 	return nil
 }
 
-func (c *Collection) DeleteVector(id string) error {
+func (c *Collection) DeleteVector(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -147,7 +163,10 @@ func (c *Collection) DeleteVector(id string) error {
 	return nil
 }
 
-func (c *Collection) Search(query core.Vector, topK int) ([]core.SearchResult, error) {
+func (c *Collection) Search(ctx context.Context, query core.Vector, topK int) ([]core.SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(query.Embeddings) != c.dim {
 		return nil, fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(query.Embeddings))
 	}
@@ -168,7 +187,10 @@ func (c *Collection) Search(query core.Vector, topK int) ([]core.SearchResult, e
 	return results, nil
 }
 
-func (c *Collection) Train() error {
+func (c *Collection) Train(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	t, ok := c.index.(core.Trainable)
 	if !ok {
 		return nil
