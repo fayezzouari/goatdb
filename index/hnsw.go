@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"sync"
 
 	"github.com/fayez/goatdb/core"
 )
@@ -39,6 +40,7 @@ type hnswNode struct {
 }
 
 type HNSWIndex struct {
+	mu             sync.RWMutex
 	dim            int
 	M              int
 	efConstruction int
@@ -49,6 +51,8 @@ type HNSWIndex struct {
 	maxLayer       int
 	distanceMetric core.DistanceMetric
 	pool           *core.VectorPool
+	codebook       *core.SQCodebook
+	sqPool         *core.Int8VectorPool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
@@ -65,6 +69,23 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 	}
 }
 
+// Train computes the SQ codebook from training vectors and quantizes all
+// existing pool vectors into the int8 pool. Must be called before AddVector
+// for maximum benefit (subsequent AddVector calls also quantize into sqPool).
+func (h *HNSWIndex) Train(vectors []core.Vector) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cb := core.NewSQCodebook(vectors)
+	if cb == nil {
+		return
+	}
+	h.codebook = cb
+	h.sqPool = core.NewInt8VectorPool(h.dim, max(h.pool.Slots(), 64))
+	for _, node := range h.nodes {
+		h.sqPool.Set(node.poolIdx, cb.Quantize(h.pool.Get(node.poolIdx)))
+	}
+}
+
 func (h *HNSWIndex) randomLevel() int {
 	return int(-math.Log(rand.Float64()) * h.mL)
 }
@@ -73,7 +94,10 @@ func (h *HNSWIndex) dist(a, b []float32) float32 {
 	return core.DistSlices(a, b, h.distanceMetric)
 }
 
-func (h *HNSWIndex) searchLayer(query []float32, eps []candidate, ef, layer int) []candidate {
+// searchLayer runs the beam search at a single HNSW layer.
+// When queryInt8 is non-nil, uses the int8 approximate distance for candidate
+// scoring (phase 1). The caller re-ranks with exact float32 after this returns.
+func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
 	visited := make(map[string]bool, ef*2)
 
 	cands := &minHeap{}
@@ -101,7 +125,12 @@ func (h *HNSWIndex) searchLayer(query []float32, eps []candidate, ef, layer int)
 			}
 			visited[nbID] = true
 			nb := h.nodes[nbID]
-			d := h.dist(query, h.pool.Get(nb.poolIdx))
+			var d float32
+			if queryInt8 != nil {
+				d = h.codebook.DistInt8(queryInt8, h.sqPool.Get(nb.poolIdx))
+			} else {
+				d = h.dist(query, h.pool.Get(nb.poolIdx))
+			}
 			f = (*W)[0]
 			if d < f.dist || W.Len() < ef {
 				heap.Push(cands, candidate{nbID, d})
@@ -149,8 +178,16 @@ func (h *HNSWIndex) selectNeighborsHeuristic(query []float32, candidates []candi
 }
 
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	level := h.randomLevel()
 	poolIdx := h.pool.Add(vector.Embeddings)
+
+	if h.codebook != nil {
+		h.sqPool.Grow(int(poolIdx) + 1)
+		h.sqPool.Set(poolIdx, h.codebook.Quantize(vector.Embeddings))
+	}
+
 	node := &hnswNode{
 		id:          id,
 		poolIdx:     poolIdx,
@@ -168,10 +205,15 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	}
 
 	q := vector.Embeddings
+	var qInt8 []int8
+	if h.codebook != nil {
+		qInt8 = h.codebook.Quantize(q)
+	}
+
 	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(q, ep, 1, layer)
+		result := h.searchLayer(q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
@@ -180,7 +222,16 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(q, ep, h.efConstruction, layer)
+		candidates := h.searchLayer(q, qInt8, ep, h.efConstruction, layer)
+
+		// re-rank candidates with exact float32 distances before neighbor selection
+		if qInt8 != nil {
+			for i := range candidates {
+				candidates[i].dist = h.dist(q, h.pool.Get(h.nodes[candidates[i].id].poolIdx))
+			}
+			sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+		}
+
 		neighbors := h.selectNeighborsHeuristic(q, candidates, mMax)
 
 		node.connections[layer] = make([]string, len(neighbors))
@@ -223,6 +274,8 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 }
 
 func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	node, ok := h.nodes[id]
 	if !ok {
 		return core.Vector{}, false
@@ -233,6 +286,8 @@ func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
 }
 
 func (h *HNSWIndex) DeleteVector(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	node, exists := h.nodes[id]
 	if !exists {
 		return false
@@ -269,19 +324,34 @@ func (h *HNSWIndex) DeleteVector(id string) bool {
 }
 
 func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if h.maxLayer == -1 {
 		return nil
 	}
 
 	q := query.Embeddings
+	var qInt8 []int8
+	if h.codebook != nil {
+		qInt8 = h.codebook.Quantize(q)
+	}
+
 	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(q, ep, 1, layer)
+		result := h.searchLayer(q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(q, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(q, qInt8, ep, max(h.ef, topK), 0)
+
+	// phase 2: re-rank with exact float32 distances
+	if qInt8 != nil {
+		for i := range candidates {
+			candidates[i].dist = h.dist(q, h.pool.Get(h.nodes[candidates[i].id].poolIdx))
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+	}
 
 	results := make([]core.SearchResult, 0, topK)
 	for i := 0; i < topK && i < len(candidates); i++ {
@@ -308,9 +378,14 @@ type hnswState struct {
 	EntryPoint     string
 	MaxLayer       int
 	Nodes          map[string]hnswNodeState
+	SQMin          float32
+	SQScale        float32
+	HasSQ          bool
 }
 
 func (h *HNSWIndex) Save(path string) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -326,7 +401,8 @@ func (h *HNSWIndex) Save(path string) error {
 			Connections: node.connections,
 		}
 	}
-	return gob.NewEncoder(file).Encode(hnswState{
+
+	state := hnswState{
 		Dim:            h.dim,
 		M:              h.M,
 		EfConstruction: h.efConstruction,
@@ -336,10 +412,18 @@ func (h *HNSWIndex) Save(path string) error {
 		EntryPoint:     h.entryPoint,
 		MaxLayer:       h.maxLayer,
 		Nodes:          nodes,
-	})
+	}
+	if h.codebook != nil {
+		state.HasSQ = true
+		state.SQMin = h.codebook.Min
+		state.SQScale = h.codebook.Scale
+	}
+	return gob.NewEncoder(file).Encode(state)
 }
 
 func (h *HNSWIndex) Load(path string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -366,6 +450,14 @@ func (h *HNSWIndex) Load(path string) error {
 			id:          id,
 			poolIdx:     poolIdx,
 			connections: ns.Connections,
+		}
+	}
+
+	if s.HasSQ {
+		h.codebook = &core.SQCodebook{Min: s.SQMin, Scale: s.SQScale, Dim: s.Dim}
+		h.sqPool = core.NewInt8VectorPool(s.Dim, h.pool.Slots())
+		for _, node := range h.nodes {
+			h.sqPool.Set(node.poolIdx, h.codebook.Quantize(h.pool.Get(node.poolIdx)))
 		}
 	}
 	return nil
