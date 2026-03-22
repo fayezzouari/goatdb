@@ -15,6 +15,11 @@ func New(database *db.Database) *Handler {
 	return &Handler{DB: database}
 }
 
+type errorResponse struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -22,7 +27,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	code := "internal_error"
+	switch status {
+	case http.StatusNotFound:
+		code = "not_found"
+	case http.StatusBadRequest:
+		code = "bad_request"
+	case http.StatusConflict:
+		code = "conflict"
+	}
+	writeJSON(w, status, errorResponse{Error: msg, Code: code})
 }
 
 func decode(r *http.Request, dst any) error {
