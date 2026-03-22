@@ -11,51 +11,64 @@ import (
 type FlatIndex struct {
 	dim            int
 	distanceMetric core.DistanceMetric
-	vectors        map[string][]float32
+	pool           *core.VectorPool
+	idToSlot       map[string]int32
+	slotToID       []string
 }
 
 func NewFlatIndex(dim int, metric core.DistanceMetric) *FlatIndex {
 	return &FlatIndex{
 		dim:            dim,
 		distanceMetric: metric,
-		vectors:        make(map[string][]float32),
+		pool:           core.NewVectorPool(dim, 64),
+		idToSlot:       make(map[string]int32),
 	}
 }
 
 func (f *FlatIndex) AddVector(id string, vector core.Vector) {
-	f.vectors[id] = vector.Embeddings
+	slot := f.pool.Add(vector.Embeddings)
+	f.idToSlot[id] = slot
+	for int(slot) >= len(f.slotToID) {
+		f.slotToID = append(f.slotToID, "")
+	}
+	f.slotToID[slot] = id
 }
 
 func (f *FlatIndex) GetVector(id string) (core.Vector, bool) {
-	emb, ok := f.vectors[id]
+	slot, ok := f.idToSlot[id]
 	if !ok {
 		return core.Vector{}, false
 	}
+	emb := make([]float32, f.dim)
+	copy(emb, f.pool.Get(slot))
 	return core.Vector{Embeddings: emb}, true
 }
 
 func (f *FlatIndex) DeleteVector(id string) bool {
-	if _, ok := f.vectors[id]; !ok {
+	slot, ok := f.idToSlot[id]
+	if !ok {
 		return false
 	}
-	delete(f.vectors, id)
+	f.pool.Free(slot)
+	f.slotToID[slot] = ""
+	delete(f.idToSlot, id)
 	return true
 }
 
 func (f *FlatIndex) Search(query core.Vector, topK int) []core.SearchResult {
+	q := query.Embeddings
 	rh := &resultHeap{}
 	heap.Init(rh)
-	for id, emb := range f.vectors {
-		v := core.Vector{Embeddings: emb}
-		dist := query.Distance(&v, f.distanceMetric)
-		result := core.SearchResult{Id: id, Distance: dist}
+	f.pool.ForEach(func(slot int32, emb []float32) {
+		dist := core.DistSlices(q, emb, f.distanceMetric)
+		result := core.SearchResult{Id: f.slotToID[slot], Distance: dist}
 		if rh.Len() < topK {
 			heap.Push(rh, result)
 		} else if dist < (*rh)[0].Distance {
 			heap.Pop(rh)
 			heap.Push(rh, result)
 		}
-	}
+	})
 	return []core.SearchResult(*rh)
 }
 
@@ -71,10 +84,16 @@ func (f *FlatIndex) Save(path string) error {
 		return err
 	}
 	defer file.Close()
+	vectors := make(map[string][]float32, len(f.idToSlot))
+	for id, slot := range f.idToSlot {
+		emb := make([]float32, f.dim)
+		copy(emb, f.pool.Get(slot))
+		vectors[id] = emb
+	}
 	return gob.NewEncoder(file).Encode(flatState{
 		Dim:            f.dim,
 		DistanceMetric: f.distanceMetric,
-		Vectors:        f.vectors,
+		Vectors:        vectors,
 	})
 }
 
@@ -90,6 +109,16 @@ func (f *FlatIndex) Load(path string) error {
 	}
 	f.dim = s.Dim
 	f.distanceMetric = s.DistanceMetric
-	f.vectors = s.Vectors
+	f.pool = core.NewVectorPool(s.Dim, len(s.Vectors))
+	f.idToSlot = make(map[string]int32, len(s.Vectors))
+	f.slotToID = make([]string, 0, len(s.Vectors))
+	for id, emb := range s.Vectors {
+		slot := f.pool.Add(emb)
+		f.idToSlot[id] = slot
+		for int(slot) >= len(f.slotToID) {
+			f.slotToID = append(f.slotToID, "")
+		}
+		f.slotToID[slot] = id
+	}
 	return nil
 }
