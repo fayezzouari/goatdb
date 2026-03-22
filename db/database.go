@@ -3,6 +3,7 @@ package db
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,6 +46,7 @@ func Open(dir string) (*Database, error) {
 		}
 		cfg, err := loadConfig(filepath.Join(dir, entry.Name()))
 		if err != nil {
+			log.Printf("warn: skipping collection dir %q: %v", entry.Name(), err)
 			continue
 		}
 		idx, err := createIndex(cfg.IndexType, cfg.Dim, cfg.Metric)
