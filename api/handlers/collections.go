@@ -26,6 +26,21 @@ func (h *Handler) CreateCollection(w http.ResponseWriter, r *http.Request) {
 	if req.IndexType == "" {
 		req.IndexType = "flat"
 	}
+	switch req.IndexType {
+	case "flat", "lsh", "hnsw", "ivf":
+	default:
+		writeError(w, http.StatusBadRequest, "index_type must be one of: flat, lsh, hnsw, ivf")
+		return
+	}
+	switch req.Metric {
+	case "", "euclidean", "cosine", "dot_product", "manhattan":
+	default:
+		writeError(w, http.StatusBadRequest, "metric must be one of: euclidean, cosine, dot_product, manhattan")
+		return
+	}
+	if req.Metric == "" {
+		req.Metric = core.Euclidean
+	}
 
 	if _, err := h.DB.CreateCollection(req.Name, req.Dim, req.Metric, req.IndexType); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
