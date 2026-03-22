@@ -8,14 +8,19 @@ type Vector struct {
 }
 
 func (v *Vector) cosine(other *Vector) float32 {
-	normV1 := float32(0)
-	normV2 := float32(0)
-	n := len(v.Embeddings)
-	for i := 0; i < n; i++ {
-		normV1 += v.Embeddings[i] * v.Embeddings[i]
-		normV2 += other.Embeddings[i] * other.Embeddings[i]
+	var normV1, normV2, dot float32
+	if hasAVX2 && len(v.Embeddings) > 0 {
+		normV1 = dotProductAVX2(&v.Embeddings[0], &v.Embeddings[0], len(v.Embeddings))
+		normV2 = dotProductAVX2(&other.Embeddings[0], &other.Embeddings[0], len(other.Embeddings))
+		dot = dotProductAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings))
+	} else {
+		n := len(v.Embeddings)
+		for i := 0; i < n; i++ {
+			normV1 += v.Embeddings[i] * v.Embeddings[i]
+			normV2 += other.Embeddings[i] * other.Embeddings[i]
+		}
+		dot = v.dotProductScalar(other)
 	}
-	dot := v.dotProduct(other)
 	if normV1 == 0 || normV2 == 0 {
 		return 0
 	}
@@ -23,6 +28,9 @@ func (v *Vector) cosine(other *Vector) float32 {
 }
 
 func (v *Vector) euclidean(other *Vector) float32 {
+	if hasAVX2 && len(v.Embeddings) > 0 {
+		return float32(math.Sqrt(float64(l2SquaredAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings)))))
+	}
 	distance := float32(0)
 	n := len(v.Embeddings)
 	for i := 0; i < n; i++ {
@@ -33,9 +41,13 @@ func (v *Vector) euclidean(other *Vector) float32 {
 }
 
 func (v *Vector) dotProduct(other *Vector) float32 {
-	if len(v.Embeddings) != len(other.Embeddings) {
-		panic("Vectors must be of the same length")
+	if hasAVX2 && len(v.Embeddings) > 0 {
+		return dotProductAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings))
 	}
+	return v.dotProductScalar(other)
+}
+
+func (v *Vector) dotProductScalar(other *Vector) float32 {
 	n := len(v.Embeddings)
 	var s0, s1, s2, s3 float32
 	i := 0
