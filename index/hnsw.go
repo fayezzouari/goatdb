@@ -34,7 +34,7 @@ func (h *maxHeap) Pop() any           { old := *h; n := len(old); x := old[n-1];
 
 type hnswNode struct {
 	id          string
-	vector      core.Vector
+	poolIdx     int32
 	connections [][]string
 }
 
@@ -48,6 +48,7 @@ type HNSWIndex struct {
 	entryPoint     string
 	maxLayer       int
 	distanceMetric core.DistanceMetric
+	pool           *core.VectorPool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
@@ -60,6 +61,7 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		nodes:          make(map[string]*hnswNode),
 		maxLayer:       -1,
 		distanceMetric: metric,
+		pool:           core.NewVectorPool(dim, 64),
 	}
 }
 
@@ -67,11 +69,11 @@ func (h *HNSWIndex) randomLevel() int {
 	return int(-math.Log(rand.Float64()) * h.mL)
 }
 
-func (h *HNSWIndex) dist(a, b *core.Vector) float32 {
-	return a.Distance(b, h.distanceMetric)
+func (h *HNSWIndex) dist(a, b []float32) float32 {
+	return core.DistSlices(a, b, h.distanceMetric)
 }
 
-func (h *HNSWIndex) searchLayer(query *core.Vector, eps []candidate, ef, layer int) []candidate {
+func (h *HNSWIndex) searchLayer(query []float32, eps []candidate, ef, layer int) []candidate {
 	visited := make(map[string]bool, ef*2)
 
 	cands := &minHeap{}
@@ -99,7 +101,7 @@ func (h *HNSWIndex) searchLayer(query *core.Vector, eps []candidate, ef, layer i
 			}
 			visited[nbID] = true
 			nb := h.nodes[nbID]
-			d := h.dist(query, &nb.vector)
+			d := h.dist(query, h.pool.Get(nb.poolIdx))
 			f = (*W)[0]
 			if d < f.dist || W.Len() < ef {
 				heap.Push(cands, candidate{nbID, d})
@@ -118,7 +120,7 @@ func (h *HNSWIndex) searchLayer(query *core.Vector, eps []candidate, ef, layer i
 	return result
 }
 
-func (h *HNSWIndex) selectNeighborsHeuristic(q *core.Vector, candidates []candidate, M int) []candidate {
+func (h *HNSWIndex) selectNeighborsHeuristic(query []float32, candidates []candidate, M int) []candidate {
 	if len(candidates) <= M {
 		return candidates
 	}
@@ -134,7 +136,7 @@ func (h *HNSWIndex) selectNeighborsHeuristic(q *core.Vector, candidates []candid
 		cNode := h.nodes[c.id]
 		for _, r := range result {
 			rNode := h.nodes[r.id]
-			if h.dist(&rNode.vector, &cNode.vector) < c.dist {
+			if h.dist(h.pool.Get(rNode.poolIdx), h.pool.Get(cNode.poolIdx)) < c.dist {
 				dominated = true
 				break
 			}
@@ -148,9 +150,10 @@ func (h *HNSWIndex) selectNeighborsHeuristic(q *core.Vector, candidates []candid
 
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
+	poolIdx := h.pool.Add(vector.Embeddings)
 	node := &hnswNode{
 		id:          id,
-		vector:      vector,
+		poolIdx:     poolIdx,
 		connections: make([][]string, level+1),
 	}
 	for i := range node.connections {
@@ -164,10 +167,11 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		return
 	}
 
-	ep := []candidate{{h.entryPoint, h.dist(&vector, &h.nodes[h.entryPoint].vector)}}
+	q := vector.Embeddings
+	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(&vector, ep, 1, layer)
+		result := h.searchLayer(q, ep, 1, layer)
 		ep = result[:1]
 	}
 
@@ -176,8 +180,8 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(&vector, ep, h.efConstruction, layer)
-		neighbors := h.selectNeighborsHeuristic(&vector, candidates, mMax)
+		candidates := h.searchLayer(q, ep, h.efConstruction, layer)
+		neighbors := h.selectNeighborsHeuristic(q, candidates, mMax)
 
 		node.connections[layer] = make([]string, len(neighbors))
 		for i, nb := range neighbors {
@@ -195,7 +199,7 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 				pruned := make([]candidate, len(conns))
 				for i, connID := range conns {
 					conn := h.nodes[connID]
-					pruned[i] = candidate{connID, h.dist(&nbNode.vector, &conn.vector)}
+					pruned[i] = candidate{connID, h.dist(h.pool.Get(nbNode.poolIdx), h.pool.Get(conn.poolIdx))}
 				}
 				for i := 1; i < len(pruned); i++ {
 					for j := i; j > 0 && pruned[j].dist < pruned[j-1].dist; j-- {
@@ -223,7 +227,9 @@ func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
 	if !ok {
 		return core.Vector{}, false
 	}
-	return node.vector, true
+	emb := make([]float32, h.dim)
+	copy(emb, h.pool.Get(node.poolIdx))
+	return core.Vector{Embeddings: emb}, true
 }
 
 func (h *HNSWIndex) DeleteVector(id string) bool {
@@ -246,6 +252,7 @@ func (h *HNSWIndex) DeleteVector(id string) bool {
 			nb.connections[layer] = updated
 		}
 	}
+	h.pool.Free(node.poolIdx)
 	delete(h.nodes, id)
 
 	if h.entryPoint == id {
@@ -266,14 +273,15 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 		return nil
 	}
 
-	ep := []candidate{{h.entryPoint, h.dist(&query, &h.nodes[h.entryPoint].vector)}}
+	q := query.Embeddings
+	ep := []candidate{{h.entryPoint, h.dist(q, h.pool.Get(h.nodes[h.entryPoint].poolIdx))}}
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(&query, ep, 1, layer)
+		result := h.searchLayer(q, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(&query, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(q, ep, max(h.ef, topK), 0)
 
 	results := make([]core.SearchResult, 0, topK)
 	for i := 0; i < topK && i < len(candidates); i++ {
@@ -311,8 +319,10 @@ func (h *HNSWIndex) Save(path string) error {
 
 	nodes := make(map[string]hnswNodeState, len(h.nodes))
 	for id, node := range h.nodes {
+		emb := make([]float32, h.dim)
+		copy(emb, h.pool.Get(node.poolIdx))
 		nodes[id] = hnswNodeState{
-			Embeddings:  node.vector.Embeddings,
+			Embeddings:  emb,
 			Connections: node.connections,
 		}
 	}
@@ -348,11 +358,13 @@ func (h *HNSWIndex) Load(path string) error {
 	h.distanceMetric = s.DistanceMetric
 	h.entryPoint = s.EntryPoint
 	h.maxLayer = s.MaxLayer
+	h.pool = core.NewVectorPool(s.Dim, len(s.Nodes))
 	h.nodes = make(map[string]*hnswNode, len(s.Nodes))
 	for id, ns := range s.Nodes {
+		poolIdx := h.pool.Add(ns.Embeddings)
 		h.nodes[id] = &hnswNode{
 			id:          id,
-			vector:      core.Vector{Embeddings: ns.Embeddings},
+			poolIdx:     poolIdx,
 			connections: ns.Connections,
 		}
 	}
