@@ -1,11 +1,14 @@
 package db
 
 import (
+	"context"
 	"testing"
 
 	"github.com/fayez/goatdb/core"
 	"github.com/fayez/goatdb/index"
 )
+
+var ctx = context.Background()
 
 func newTestCollection(t *testing.T) *Collection {
 	t.Helper()
@@ -23,11 +26,11 @@ func TestCollectionAddGet(t *testing.T) {
 	col := newTestCollection(t)
 
 	v := core.Vector{Embeddings: []float32{1, 0}, Metadata: map[string]any{"tag": "a"}}
-	if err := col.AddVector("v1", v); err != nil {
+	if err := col.AddVector(ctx, "v1", v); err != nil {
 		t.Fatal(err)
 	}
 
-	got, ok := col.GetVector("v1")
+	got, ok := col.GetVector(ctx, "v1")
 	if !ok {
 		t.Fatal("vector not found")
 	}
@@ -41,7 +44,7 @@ func TestCollectionAddGet(t *testing.T) {
 
 func TestCollectionDimensionMismatch(t *testing.T) {
 	col := newTestCollection(t)
-	err := col.AddVector("v1", core.Vector{Embeddings: []float32{1, 2, 3}})
+	err := col.AddVector(ctx, "v1", core.Vector{Embeddings: []float32{1, 2, 3}})
 	if err == nil {
 		t.Error("expected dimension mismatch error")
 	}
@@ -50,12 +53,12 @@ func TestCollectionDimensionMismatch(t *testing.T) {
 func TestCollectionUpdate(t *testing.T) {
 	col := newTestCollection(t)
 
-	col.AddVector("v1", core.Vector{Embeddings: []float32{1, 0}})
-	if err := col.UpdateVector("v1", core.Vector{Embeddings: []float32{0, 1}, Metadata: map[string]any{"updated": true}}); err != nil {
+	col.AddVector(ctx, "v1", core.Vector{Embeddings: []float32{1, 0}})
+	if err := col.UpdateVector(ctx, "v1", core.Vector{Embeddings: []float32{0, 1}, Metadata: map[string]any{"updated": true}}); err != nil {
 		t.Fatal(err)
 	}
 
-	got, ok := col.GetVector("v1")
+	got, ok := col.GetVector(ctx, "v1")
 	if !ok {
 		t.Fatal("vector not found after update")
 	}
@@ -67,12 +70,12 @@ func TestCollectionUpdate(t *testing.T) {
 func TestCollectionDelete(t *testing.T) {
 	col := newTestCollection(t)
 
-	col.AddVector("v1", core.Vector{Embeddings: []float32{1, 0}})
-	if err := col.DeleteVector("v1"); err != nil {
+	col.AddVector(ctx, "v1", core.Vector{Embeddings: []float32{1, 0}})
+	if err := col.DeleteVector(ctx, "v1"); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := col.GetVector("v1"); ok {
+	if _, ok := col.GetVector(ctx, "v1"); ok {
 		t.Error("expected vector to be deleted")
 	}
 }
@@ -80,10 +83,10 @@ func TestCollectionDelete(t *testing.T) {
 func TestCollectionSearch(t *testing.T) {
 	col := newTestCollection(t)
 
-	col.AddVector("a", core.Vector{Embeddings: []float32{1, 0}})
-	col.AddVector("b", core.Vector{Embeddings: []float32{0, 1}})
+	col.AddVector(ctx, "a", core.Vector{Embeddings: []float32{1, 0}})
+	col.AddVector(ctx, "b", core.Vector{Embeddings: []float32{0, 1}})
 
-	results, err := col.Search(core.Vector{Embeddings: []float32{1, 0}}, 1)
+	results, err := col.Search(ctx, core.Vector{Embeddings: []float32{1, 0}}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,17 +98,17 @@ func TestCollectionSearch(t *testing.T) {
 func TestCollectionPersistence(t *testing.T) {
 	dir := t.TempDir()
 
-	db, err := Open(dir)
+	database, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	col, err := db.CreateCollection("vecs", 2, core.Euclidean, "flat")
+	col, err := database.CreateCollection("vecs", 2, core.Euclidean, "flat")
 	if err != nil {
 		t.Fatal(err)
 	}
-	col.AddVector("x", core.Vector{Embeddings: []float32{1, 1}})
-	db.Close()
+	col.AddVector(ctx, "x", core.Vector{Embeddings: []float32{1, 1}})
+	database.Close()
 
 	db2, err := Open(dir)
 	if err != nil {
@@ -118,7 +121,7 @@ func TestCollectionPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := col2.Search(core.Vector{Embeddings: []float32{1, 1}}, 1)
+	results, err := col2.Search(ctx, core.Vector{Embeddings: []float32{1, 1}}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
