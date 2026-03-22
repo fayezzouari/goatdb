@@ -11,7 +11,7 @@ func newTestCollection(t *testing.T) *Collection {
 	t.Helper()
 	dir := t.TempDir()
 	idx := index.NewFlatIndex(2, core.Euclidean)
-	col, err := newCollection("test", 2, dir, idx)
+	col, err := newCollection("test", 2, core.Euclidean, "flat", dir, idx)
 	if err != nil {
 		t.Fatal(err)
 	}
