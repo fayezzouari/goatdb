@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GoatDB Console</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --border:   #30363d;
+  --accent:   #58a6ff;
+  --accent2:  #3fb950;
+  --danger:   #f85149;
+  --text:     #c9d1d9;
+  --muted:    #8b949e;
+  --radius:   8px;
+}
+
+body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+
+/* ── top bar ── */
+header { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--border); }
+header .logo { font-weight: 700; font-size: 1.1rem; color: var(--accent); }
+header .server { font-size: .8rem; color: var(--muted); }
+header .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+header .status-dot.ok  { background: var(--accent2); }
+header .status-dot.err { background: var(--danger); }
+header { justify-content: space-between; }
+.header-left { display: flex; align-items: center; gap: 10px; }
+
+/* ── layout ── */
+.layout { display: flex; flex: 1; overflow: hidden; }
+
+/* ── sidebar ── */
+aside { width: 220px; min-width: 160px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+aside h3 { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 12px 12px 6px; }
+#collectionList { flex: 1; overflow-y: auto; }
+.col-item { padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent; font-size: .85rem; display: flex; justify-content: space-between; align-items: center; }
+.col-item:hover { background: #1f2937; }
+.col-item.active { border-left-color: var(--accent); color: var(--accent); background: #1a2332; }
+.col-item .badge { font-size: .7rem; color: var(--muted); background: var(--border); padding: 1px 5px; border-radius: 4px; }
+.sidebar-actions { padding: 10px; border-top: 1px solid var(--border); }
+
+/* ── main panel ── */
+main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); }
+.tab { padding: 10px 18px; font-size: .85rem; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.panels { flex: 1; overflow-y: auto; padding: 20px; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ── form elements ── */
+label { font-size: .8rem; color: var(--muted); display: block; margin-bottom: 4px; margin-top: 12px; }
+input, select, textarea {
+  width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius); padding: 7px 10px; font-size: .85rem; font-family: inherit;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { resize: vertical; min-height: 80px; font-family: 'Fira Code', monospace; font-size: .78rem; }
+
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--radius); border: 1px solid transparent; font-size: .82rem; font-weight: 500; cursor: pointer; transition: opacity .15s; }
+.btn:hover { opacity: .85; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary  { background: var(--accent); color: #0d1117; }
+.btn-success  { background: var(--accent2); color: #0d1117; }
+.btn-danger   { background: var(--danger); color: #fff; }
+.btn-ghost    { background: transparent; border-color: var(--border); color: var(--text); }
+.btn-sm { padding: 4px 10px; font-size: .76rem; }
+
+.row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 140px; }
+.row > .btn { flex: 0 0 auto; }
+.row > .btn-auto { flex: 0 0 auto; }
+
+/* ── results ── */
+.result-box { margin-top: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.result-box pre { padding: 14px; font-size: .76rem; font-family: 'Fira Code', monospace; overflow-x: auto; white-space: pre-wrap; color: var(--text); }
+.result-header { padding: 8px 14px; background: #21262d; font-size: .76rem; color: var(--muted); display: flex; justify-content: space-between; }
+.result-header .tag { padding: 2px 8px; border-radius: 20px; font-weight: 600; font-size: .7rem; }
+.tag-ok  { background: #0f3d20; color: var(--accent2); }
+.tag-err { background: #3d0f0f; color: var(--danger); }
+
+/* ── search results cards ── */
+.search-results { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.result-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; }
+.result-card .rid { font-size: .85rem; font-weight: 600; }
+.result-card .rdist { font-size: .8rem; color: var(--muted); }
+.result-card .rmeta { font-size: .72rem; color: var(--muted); font-family: monospace; }
+
+/* ── new collection modal ── */
+.overlay { position: fixed; inset: 0; background: #00000088; display: none; align-items: center; justify-content: center; z-index: 100; }
+.overlay.show { display: flex; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 380px; max-width: 95vw; }
+.modal h2 { font-size: 1rem; margin-bottom: 4px; }
+.modal .subtitle { font-size: .8rem; color: var(--muted); margin-bottom: 16px; }
+.modal-actions { margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ── empty state ── */
+.empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+.empty h3 { font-size: 1rem; margin-bottom: 8px; }
+.empty p { font-size: .85rem; }
+
+/* scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ── header ──────────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <span class="logo">GoatDB</span>
+    <span class="server" id="serverAddr">localhost:8080</span>
+  </div>
+  <div class="header-left">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="server" id="statusText">connecting…</span>
+  </div>
+</header>
+
+<!-- ── layout ──────────────────────────────────────────────── -->
+<div class="layout">
+
+  <!-- sidebar -->
+  <aside>
+    <h3>Collections</h3>
+    <div id="collectionList"><div class="empty" style="padding:24px 12px"><p>No collections</p></div></div>
+    <div class="sidebar-actions">
+      <button class="btn btn-ghost" style="width:100%" onclick="openNewCollection()">+ New collection</button>
+    </div>
+  </aside>
+
+  <!-- main -->
+  <main>
+    <div class="tabs" id="tabs">
+      <div class="tab active" data-tab="search">Search</div>
+      <div class="tab" data-tab="add">Add vector</div>
+      <div class="tab" data-tab="get">Get vector</div>
+      <div class="tab" data-tab="info">Info</div>
+    </div>
+
+    <div class="panels">
+
+      <!-- no collection selected -->
+      <div id="noCollection" class="empty" style="display:none">
+        <h3>Select a collection</h3>
+        <p>Choose one from the sidebar or create a new one.</p>
+      </div>
+
+      <!-- search panel -->
+      <div class="panel active" id="panel-search">
+        <label>Query vector (JSON array of floats, or leave blank to generate random)</label>
+        <textarea id="searchQuery" rows="4" placeholder='[0.1, -0.2, 0.5, ...]'></textarea>
+        <div class="row" style="margin-top:10px">
+          <div>
+            <label>Top K</label>
+            <input type="number" id="searchK" value="10" min="1" max="200">
+          </div>
+          <button class="btn btn-ghost btn-auto" onclick="fillRandom('searchQuery')">Random</button>
+          <button class="btn btn-primary btn-auto" id="btnSearch" onclick="doSearch()">Search</button>
+        </div>
+        <div id="searchOut"></div>
+      </div>
+
+      <!-- add panel -->
+      <div class="panel" id="panel-add">
+        <label>Vector ID</label>
+        <input type="text" id="addId" placeholder="my-vector-001">
+        <label>Embeddings (JSON array of floats, or click Random)</label>
+        <textarea id="addEmb" rows="4" placeholder='[0.1, -0.2, 0.5, ...]'></textarea>
+        <label>Metadata (optional JSON object)</label>
+        <textarea id="addMeta" rows="3" placeholder='{"source": "doc-42", "tag": "intro"}'></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="btn btn-ghost btn-auto" onclick="fillRandom('addEmb')">Random</button>
+          <button class="btn btn-success btn-auto" onclick="doAdd()">Add vector</button>
+        </div>
+        <div id="addOut"></div>
+      </div>
+
+      <!-- get panel -->
+      <div class="panel" id="panel-get">
+        <label>Vector ID</label>
+        <div class="row">
+          <input type="text" id="getId" placeholder="my-vector-001">
+          <button class="btn btn-primary btn-auto" onclick="doGet()">Fetch</button>
+          <button class="btn btn-danger btn-auto" onclick="doDelete()">Delete</button>
+        </div>
+        <div id="getOut"></div>
+      </div>
+
+      <!-- info panel -->
+      <div class="panel" id="panel-info">
+        <div id="infoOut"></div>
+        <div style="margin-top:16px">
+          <button class="btn btn-danger btn-sm" onclick="doDrop()">Drop collection</button>
+        </div>
+      </div>
+
+    </div><!-- /panels -->
+  </main>
+
+</div><!-- /layout -->
+
+<!-- ── new collection modal ──────────────────────────────────── -->
+<div class="overlay" id="modalOverlay" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>New collection</h2>
+    <div class="subtitle">Configure an ANN index for your vectors.</div>
+
+    <label>Name</label>
+    <input type="text" id="newName" placeholder="my-collection">
+
+    <label>Dimension</label>
+    <input type="number" id="newDim" value="128" min="1">
+
+    <label>Index type</label>
+    <select id="newIndex">
+      <option value="flat">Flat (exact, small datasets)</option>
+      <option value="lsh">LSH (fast approximate)</option>
+      <option value="hnsw" selected>HNSW (best recall/speed tradeoff)</option>
+      <option value="ivf">IVF (must train first)</option>
+    </select>
+
+    <label>Distance metric</label>
+    <select id="newMetric">
+      <option value="euclidean" selected>Euclidean</option>
+      <option value="cosine">Cosine</option>
+      <option value="dot_product">Dot product</option>
+    </select>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeNewCollection()">Cancel</button>
+      <button class="btn btn-primary" onclick="createCollection()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── state ──────────────────────────────────────────────────────────────────
+const BASE = '';   // same origin
+let activeCol = null;
+let collections = {};  // name -> info
+
+// ── api helpers ────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  try {
+    const r = await fetch(BASE + path, opts);
+    const text = await r.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch(_) { data = { raw: text }; }
+    return { ok: r.ok, status: r.status, data };
+  } catch(e) {
+    return { ok: false, status: 0, data: { error: e.message } };
+  }
+}
+
+// ── health check ───────────────────────────────────────────────────────────
+async function checkHealth() {
+  const r = await api('GET', '/health');
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  if (r.ok) {
+    dot.className = 'status-dot ok';
+    txt.textContent = 'connected';
+  } else {
+    dot.className = 'status-dot err';
+    txt.textContent = 'offline';
+  }
+}
+
+// ── collections ────────────────────────────────────────────────────────────
+async function loadCollections() {
+  const r = await api('GET', '/collections');
+  if (!r.ok) return;
+  const list = r.data.collections || [];
+  collections = {};
+  for (const name of list) collections[name] = { name };
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const el = document.getElementById('collectionList');
+  const names = Object.keys(collections);
+  if (!names.length) {
+    el.innerHTML = '<div class="empty" style="padding:24px 12px"><p>No collections</p></div>';
+    return;
+  }
+  el.innerHTML = names.map(n => {
+    const c = collections[n];
+    return `<div class="col-item${n===activeCol?' active':''}" onclick="selectCollection('${n}')">
+      <span>${n}</span>
+      <span class="badge">${c.index_type||''}</span>
+    </div>`;
+  }).join('');
+}
+
+function selectCollection(name) {
+  activeCol = name;
+  renderSidebar();
+  document.getElementById('noCollection').style.display = 'none';
+  showTab('search');
+  loadInfo();
+}
+
+// ── tabs ───────────────────────────────────────────────────────────────────
+document.getElementById('tabs').addEventListener('click', e => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  showTab(tab.dataset.tab);
+});
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab===name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id==='panel-'+name));
+  if (name === 'info') loadInfo();
+}
+
+// ── render result box ──────────────────────────────────────────────────────
+function resultBox(targetId, ok, data) {
+  const el = document.getElementById(targetId);
+  const tag = ok ? '<span class="tag tag-ok">OK</span>' : '<span class="tag tag-err">ERROR</span>';
+  el.innerHTML = `<div class="result-box">
+    <div class="result-header"><span>Response</span>${tag}</div>
+    <pre>${escHtml(JSON.stringify(data, null, 2))}</pre>
+  </div>`;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── random vector ──────────────────────────────────────────────────────────
+function randomVec(dim) {
+  return Array.from({length: dim}, () => (Math.random()*2-1).toFixed(5)*1);
+}
+
+function fillRandom(textareaId) {
+  if (!activeCol) return;
+  const dim = (collections[activeCol]||{}).dim || 128;
+  document.getElementById(textareaId).value = JSON.stringify(randomVec(dim));
+}
+
+// ── search ─────────────────────────────────────────────────────────────────
+async function doSearch() {
+  if (!activeCol) { resultBox('searchOut', false, { error: 'No collection selected' }); return; }
+  let query = document.getElementById('searchQuery').value.trim();
+  const k = parseInt(document.getElementById('searchK').value) || 10;
+  const dim = (collections[activeCol]||{}).dim || 128;
+  if (!query) query = JSON.stringify(randomVec(dim));
+  let embeddings;
+  try { embeddings = JSON.parse(query); } catch(e) { resultBox('searchOut', false, { error: 'Invalid JSON' }); return; }
+  const r = await api('POST', `/collections/${activeCol}/search`, { embeddings, top_k: k });
+  if (r.ok && r.data.results) {
+    renderSearchResults(r.data.results);
+  } else {
+    resultBox('searchOut', r.ok, r.data);
+  }
+}
+
+function renderSearchResults(results) {
+  const el = document.getElementById('searchOut');
+  if (!results.length) {
+    el.innerHTML = '<div class="result-box"><pre>No results found.</pre></div>';
+    return;
+  }
+  el.innerHTML = '<div class="search-results">' +
+    results.map((r,i) => `<div class="result-card">
+      <div>
+        <div class="rid">#${i+1} &nbsp; ${escHtml(r.id)}</div>
+        ${r.metadata ? `<div class="rmeta">${escHtml(JSON.stringify(r.metadata))}</div>` : ''}
+      </div>
+      <div class="rdist">dist: ${(r.distance||0).toFixed(6)}</div>
+    </div>`).join('') + '</div>';
+}
+
+// ── add vector ─────────────────────────────────────────────────────────────
+async function doAdd() {
+  if (!activeCol) { resultBox('addOut', false, { error: 'No collection selected' }); return; }
+  const id = document.getElementById('addId').value.trim();
+  const embStr = document.getElementById('addEmb').value.trim();
+  const metaStr = document.getElementById('addMeta').value.trim();
+  if (!id) { resultBox('addOut', false, { error: 'ID is required' }); return; }
+  if (!embStr) { resultBox('addOut', false, { error: 'Embeddings are required — type text and click Embed, or paste a JSON array' }); return; }
+  let embeddings;
+  try { embeddings = JSON.parse(embStr); } catch(e) { resultBox('addOut', false, { error: 'Invalid embeddings JSON' }); return; }
+  const body = { id, embeddings };
+  if (metaStr) {
+    try { body.metadata = JSON.parse(metaStr); } catch(e) { resultBox('addOut', false, { error: 'Invalid metadata JSON' }); return; }
+  }
+  const r = await api('POST', `/collections/${activeCol}/vectors`, body);
+  resultBox('addOut', r.ok, r.data);
+}
+
+// ── get / delete ───────────────────────────────────────────────────────────
+async function doGet() {
+  if (!activeCol) return;
+  const id = document.getElementById('getId').value.trim();
+  if (!id) return alert('ID is required');
+  const r = await api('GET', `/collections/${activeCol}/vectors/${encodeURIComponent(id)}`);
+  resultBox('getOut', r.ok, r.data);
+}
+
+async function doDelete() {
+  if (!activeCol) return;
+  const id = document.getElementById('getId').value.trim();
+  if (!id) return alert('ID is required');
+  if (!confirm(`Delete vector "${id}" from "${activeCol}"?`)) return;
+  const r = await api('DELETE', `/collections/${activeCol}/vectors/${encodeURIComponent(id)}`);
+  resultBox('getOut', r.ok, r.data || { deleted: true });
+}
+
+// ── info ───────────────────────────────────────────────────────────────────
+async function loadInfo() {
+  if (!activeCol) return;
+  const r = await api('GET', `/collections/${activeCol}`);
+  const el = document.getElementById('infoOut');
+  if (r.ok) {
+    const c = r.data;
+    collections[activeCol] = c;
+    renderSidebar();
+    el.innerHTML = `<div class="result-box">
+      <div class="result-header"><span>${escHtml(activeCol)}</span><span class="tag tag-ok">Active</span></div>
+      <pre>${escHtml(JSON.stringify(c, null, 2))}</pre>
+    </div>`;
+  } else {
+    resultBox('infoOut', false, r.data);
+  }
+}
+
+// ── drop collection ────────────────────────────────────────────────────────
+async function doDrop() {
+  if (!activeCol) return;
+  if (!confirm(`Drop collection "${activeCol}"? This cannot be undone.`)) return;
+  const r = await api('DELETE', `/collections/${activeCol}`);
+  if (r.ok) {
+    activeCol = null;
+    document.getElementById('infoOut').innerHTML = '';
+    await loadCollections();
+  } else {
+    resultBox('infoOut', false, r.data);
+  }
+}
+
+// ── new collection modal ───────────────────────────────────────────────────
+function openNewCollection() {
+  document.getElementById('modalOverlay').classList.add('show');
+  document.getElementById('newName').focus();
+}
+function closeNewCollection() {
+  document.getElementById('modalOverlay').classList.remove('show');
+}
+function closeModal(e) {
+  if (e.target === document.getElementById('modalOverlay')) closeNewCollection();
+}
+
+async function createCollection() {
+  const name   = document.getElementById('newName').value.trim();
+  const dim    = parseInt(document.getElementById('newDim').value);
+  const index_type = document.getElementById('newIndex').value;
+  const metric = document.getElementById('newMetric').value;
+  if (!name) return alert('Name is required');
+  if (!dim || dim < 1) return alert('Dimension must be >= 1');
+  const r = await api('POST', '/collections', { name, dim, index_type, metric });
+  if (r.ok) {
+    closeNewCollection();
+    await loadCollections();
+    selectCollection(name);
+  } else {
+    alert((r.data && r.data.error) || 'Failed to create collection');
+  }
+}
+
+// ── init ───────────────────────────────────────────────────────────────────
+(async function init() {
+  await checkHealth();
+  await loadCollections();
+  // if no collection yet, show hint
+  if (!Object.keys(collections).length) {
+    document.getElementById('noCollection').style.display = 'block';
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  }
+  // poll health every 10s
+  setInterval(checkHealth, 10_000);
+})();
+</script>
+</body>
+</html>
