@@ -21,6 +21,22 @@ type LSHIndex struct {
 	tables         []lshTable
 	vectors        map[string]core.Vector
 	distanceMetric core.DistanceMetric
+	perturbMasks   []uint64
+}
+
+func multiProbeMasks(K int) []uint64 {
+	var masks []uint64
+	for i := 0; i < K; i++ {
+		masks = append(masks, 1<<uint(i))
+	}
+	if K <= 6 {
+		for i := 0; i < K; i++ {
+			for j := i + 1; j < K; j++ {
+				masks = append(masks, (1<<uint(i))|(1<<uint(j)))
+			}
+		}
+	}
+	return masks
 }
 
 func NewLSHIndex(dim, L, K int, metric core.DistanceMetric) *LSHIndex {
@@ -43,6 +59,7 @@ func NewLSHIndex(dim, L, K int, metric core.DistanceMetric) *LSHIndex {
 		tables:         tables,
 		vectors:        make(map[string]core.Vector),
 		distanceMetric: metric,
+		perturbMasks:   multiProbeMasks(K),
 	}
 }
 
@@ -101,6 +118,14 @@ func (l *LSHIndex) Search(query core.Vector, topK int) []core.SearchResult {
 			if !seen[id] {
 				seen[id] = true
 				candidates = append(candidates, id)
+			}
+		}
+		for _, mask := range l.perturbMasks {
+			for _, id := range l.tables[i].buckets[h^mask] {
+				if !seen[id] {
+					seen[id] = true
+					candidates = append(candidates, id)
+				}
 			}
 		}
 	}
@@ -182,5 +207,6 @@ func (l *LSHIndex) Load(path string) error {
 	for id, emb := range s.Vectors {
 		l.vectors[id] = core.Vector{Embeddings: emb}
 	}
+	l.perturbMasks = multiProbeMasks(l.K)
 	return nil
 }
