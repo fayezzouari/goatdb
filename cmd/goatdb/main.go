@@ -23,6 +23,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
+	log.Printf("data dir: %s", *dir)
 
 	srv := api.NewServer(database, *addr)
 
