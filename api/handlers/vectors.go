@@ -27,7 +27,7 @@ func (h *Handler) AddVector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := col.AddVector(req.Id, core.Vector{Embeddings: req.Embeddings, Metadata: req.Metadata}); err != nil {
+	if err := col.AddVector(r.Context(), req.Id, core.Vector{Embeddings: req.Embeddings, Metadata: req.Metadata}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -61,7 +61,7 @@ func (h *Handler) AddVectors(w http.ResponseWriter, r *http.Request) {
 		batch[v.Id] = core.Vector{Embeddings: v.Embeddings, Metadata: v.Metadata}
 	}
 
-	if err := col.AddVectors(batch); err != nil {
+	if err := col.AddVectors(r.Context(), batch); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -76,7 +76,7 @@ func (h *Handler) GetVector(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := r.PathValue("id")
-	v, ok := col.GetVector(id)
+	v, ok := col.GetVector(r.Context(), id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "vector not found")
 		return
@@ -101,7 +101,7 @@ func (h *Handler) UpdateVector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := col.UpdateVector(r.PathValue("id"), core.Vector{Embeddings: req.Embeddings, Metadata: req.Metadata}); err != nil {
+	if err := col.UpdateVector(r.Context(), r.PathValue("id"), core.Vector{Embeddings: req.Embeddings, Metadata: req.Metadata}); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -115,7 +115,7 @@ func (h *Handler) DeleteVector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := col.DeleteVector(r.PathValue("id")); err != nil {
+	if err := col.DeleteVector(r.Context(), r.PathValue("id")); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
