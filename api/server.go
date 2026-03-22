@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/fayez/goatdb/api/handlers"
+	"github.com/fayez/goatdb/api/middleware"
 	"github.com/fayez/goatdb/db"
 )
 
@@ -26,7 +27,8 @@ func NewServer(database *db.Database, addr string) *Server {
 	mux.HandleFunc("POST /collections/{name}/search", h.Search)
 	mux.HandleFunc("POST /collections/{name}/train", h.Train)
 
-	return &Server{httpSv: &http.Server{Addr: addr, Handler: mux}}
+	handler := middleware.Logging(middleware.Recovery(mux))
+	return &Server{httpSv: &http.Server{Addr: addr, Handler: handler}}
 }
 
 func (s *Server) Start() error {
