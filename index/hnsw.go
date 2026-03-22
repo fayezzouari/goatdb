@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 
 	"github.com/fayez/goatdb/core"
 )
@@ -117,11 +118,32 @@ func (h *HNSWIndex) searchLayer(query *core.Vector, eps []candidate, ef, layer i
 	return result
 }
 
-func selectNeighbors(candidates []candidate, M int) []candidate {
+func (h *HNSWIndex) selectNeighborsHeuristic(q *core.Vector, candidates []candidate, M int) []candidate {
 	if len(candidates) <= M {
 		return candidates
 	}
-	return candidates[:M]
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].dist < candidates[j].dist
+	})
+	result := make([]candidate, 0, M)
+	for _, c := range candidates {
+		if len(result) >= M {
+			break
+		}
+		dominated := false
+		cNode := h.nodes[c.id]
+		for _, r := range result {
+			rNode := h.nodes[r.id]
+			if h.dist(&rNode.vector, &cNode.vector) < c.dist {
+				dominated = true
+				break
+			}
+		}
+		if !dominated {
+			result = append(result, c)
+		}
+	}
+	return result
 }
 
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
@@ -155,7 +177,7 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 			mMax = h.M * 2
 		}
 		candidates := h.searchLayer(&vector, ep, h.efConstruction, layer)
-		neighbors := selectNeighbors(candidates, mMax)
+		neighbors := h.selectNeighborsHeuristic(&vector, candidates, mMax)
 
 		node.connections[layer] = make([]string, len(neighbors))
 		for i, nb := range neighbors {
