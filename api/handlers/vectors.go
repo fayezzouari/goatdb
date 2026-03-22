@@ -34,6 +34,40 @@ func (h *Handler) AddVector(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": req.Id})
 }
 
+func (h *Handler) AddVectors(w http.ResponseWriter, r *http.Request) {
+	col, err := h.DB.GetCollection(r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var req struct {
+		Vectors []struct {
+			Id string `json:"id"`
+			vectorReq
+		} `json:"vectors"`
+	}
+	if err := decode(r, &req); err != nil || len(req.Vectors) == 0 {
+		writeError(w, http.StatusBadRequest, "vectors array is required")
+		return
+	}
+
+	batch := make(map[string]core.Vector, len(req.Vectors))
+	for _, v := range req.Vectors {
+		if v.Id == "" || len(v.Embeddings) == 0 {
+			writeError(w, http.StatusBadRequest, "each vector requires id and embeddings")
+			return
+		}
+		batch[v.Id] = core.Vector{Embeddings: v.Embeddings, Metadata: v.Metadata}
+	}
+
+	if err := col.AddVectors(batch); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]int{"inserted": len(batch)})
+}
+
 func (h *Handler) GetVector(w http.ResponseWriter, r *http.Request) {
 	col, err := h.DB.GetCollection(r.PathValue("name"))
 	if err != nil {
