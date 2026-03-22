@@ -27,7 +27,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		req.TopK = 10
 	}
 
-	results, err := col.Search(core.Vector{Embeddings: req.Embeddings}, req.TopK)
+	results, err := col.Search(r.Context(), core.Vector{Embeddings: req.Embeddings}, req.TopK)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -58,7 +58,7 @@ func (h *Handler) Train(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := col.Train(); err != nil {
+	if err := col.Train(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
