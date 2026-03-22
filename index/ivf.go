@@ -34,21 +34,52 @@ func NewIVFIndex(dim, nClusters, nProbe int, metric core.DistanceMetric) *IVFInd
 	}
 }
 
+func kmeansppInit(vectors []core.Vector, k int) [][]float32 {
+	centroids := make([][]float32, k)
+	i := rand.Intn(len(vectors))
+	c0 := make([]float32, len(vectors[i].Embeddings))
+	copy(c0, vectors[i].Embeddings)
+	centroids[0] = c0
+
+	for ci := 1; ci < k; ci++ {
+		dists := make([]float64, len(vectors))
+		var total float64
+		for j, v := range vectors {
+			minD := float32(math.MaxFloat32)
+			for c := 0; c < ci; c++ {
+				if d := l2sq(v.Embeddings, centroids[c]); d < minD {
+					minD = d
+				}
+			}
+			dists[j] = float64(minD)
+			total += dists[j]
+		}
+		target := rand.Float64() * total
+		cum := 0.0
+		chosen := len(vectors) - 1
+		for j, d := range dists {
+			cum += d
+			if cum >= target {
+				chosen = j
+				break
+			}
+		}
+		c := make([]float32, len(vectors[chosen].Embeddings))
+		copy(c, vectors[chosen].Embeddings)
+		centroids[ci] = c
+	}
+	return centroids
+}
+
 func (idx *IVFIndex) Train(vectors []core.Vector) {
 	n := len(vectors)
 	if n < idx.nClusters {
 		idx.nClusters = n
 	}
 
-	perm := rand.Perm(n)
-	idx.centroids = make([][]float32, idx.nClusters)
-	for i := range idx.centroids {
-		c := make([]float32, idx.dim)
-		copy(c, vectors[perm[i]].Embeddings)
-		idx.centroids[i] = c
-	}
+	idx.centroids = kmeansppInit(vectors, idx.nClusters)
 
-	for iter := 0; iter < 20; iter++ {
+	for iter := 0; iter < 30; iter++ {
 		sums := make([][]float32, idx.nClusters)
 		counts := make([]int, idx.nClusters)
 		for i := range sums {
