@@ -4,11 +4,13 @@ import (
 	"container/heap"
 	"encoding/gob"
 	"os"
+	"sync"
 
 	"github.com/fayez/goatdb/core"
 )
 
 type FlatIndex struct {
+	mu             sync.RWMutex
 	dim            int
 	distanceMetric core.DistanceMetric
 	pool           *core.VectorPool
@@ -26,6 +28,8 @@ func NewFlatIndex(dim int, metric core.DistanceMetric) *FlatIndex {
 }
 
 func (f *FlatIndex) AddVector(id string, vector core.Vector) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	slot := f.pool.Add(vector.Embeddings)
 	f.idToSlot[id] = slot
 	for int(slot) >= len(f.slotToID) {
@@ -35,6 +39,8 @@ func (f *FlatIndex) AddVector(id string, vector core.Vector) {
 }
 
 func (f *FlatIndex) GetVector(id string) (core.Vector, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	slot, ok := f.idToSlot[id]
 	if !ok {
 		return core.Vector{}, false
@@ -45,6 +51,8 @@ func (f *FlatIndex) GetVector(id string) (core.Vector, bool) {
 }
 
 func (f *FlatIndex) DeleteVector(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	slot, ok := f.idToSlot[id]
 	if !ok {
 		return false
@@ -56,6 +64,8 @@ func (f *FlatIndex) DeleteVector(id string) bool {
 }
 
 func (f *FlatIndex) Search(query core.Vector, topK int) []core.SearchResult {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	q := query.Embeddings
 	rh := &resultHeap{}
 	heap.Init(rh)
@@ -79,6 +89,8 @@ type flatState struct {
 }
 
 func (f *FlatIndex) Save(path string) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -98,6 +110,8 @@ func (f *FlatIndex) Save(path string) error {
 }
 
 func (f *FlatIndex) Load(path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	file, err := os.Open(path)
 	if err != nil {
 		return err
