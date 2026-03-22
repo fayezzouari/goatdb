@@ -66,6 +66,12 @@ func (v *Vector) Distance(other *Vector, metric DistanceMetric) float32 {
 	}
 }
 
+func DistSlices(a, b []float32, metric DistanceMetric) float32 {
+	va := Vector{Embeddings: a}
+	vb := Vector{Embeddings: b}
+	return va.Distance(&vb, metric)
+}
+
 func (v *Vector) manhattan(other *Vector) float32 {
 	distance := float32(0)
 	n := len(v.Embeddings)
