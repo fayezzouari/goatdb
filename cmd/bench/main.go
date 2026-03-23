@@ -27,14 +27,14 @@ var (
 var datasetSizes = []int{10_000, 100_000, 1_000_000}
 
 type result struct {
-	index     string
-	n         int
-	buildMs   float64
-	recallAt  float64
-	qps       float64
-	p50Us     float64
-	p95Us     float64
-	p99Us     float64
+	index    string
+	n        int
+	buildMs  float64
+	recallAt float64
+	qps      float64
+	p50Us    float64
+	p95Us    float64
+	p99Us    float64
 }
 
 func randVec(dim int) core.Vector {
@@ -68,14 +68,10 @@ type indexFactory struct {
 	name    string
 	build   func(dim int) core.Index
 	trained bool
-	skipAt  int // skip this index for n >= skipAt (0 = never skip)
+	skipAt  int
 }
 
 func factories(dim, n int) []indexFactory {
-	// HNSW params must balance recall and build time.
-	// At 1M each AddVector does O(ef×M×layers) random hops into a pool that
-	// exceeds L3 cache, so every hop is a ~100ns DRAM miss. Keep params small
-	// enough that the full build completes in a few minutes.
 	hnswM := 16
 	efConstruction := 200
 	ef := 128
@@ -85,12 +81,11 @@ func factories(dim, n int) []indexFactory {
 		ef = 350
 	}
 	if n >= 1_000_000 {
-		hnswM = 12
-		efConstruction = 64
-		ef = 200
+		hnswM = 24
+		efConstruction = 400
+		ef = 600
 	}
 
-	// IVF: nClusters ~ sqrt(N), capped to keep k-means training tractable.
 	nClusters := int(math.Sqrt(float64(n)))
 	if nClusters < 16 {
 		nClusters = 16
@@ -98,16 +93,11 @@ func factories(dim, n int) []indexFactory {
 	if nClusters > 256 {
 		nClusters = 256
 	}
-	// nProbe/nClusters controls the recall/speed trade-off.
-	// At 10k: sqrt(10k)=100 clusters, /4=25 probes → 25% coverage.
-	// At 100k: capped at 256 clusters, /4=64 probes → 25k comparisons/query.
 	nProbe := nClusters / 4
 	if nProbe < 10 {
 		nProbe = 10
 	}
 
-	// LSH: K=8 gives 256 buckets → ~390 vectors/bucket at 100k, ~3900 at 1M.
-	// More tables compensate for lower per-table collision probability at scale.
 	lshK := 8
 	lshL := 20
 	if n >= 100_000 {
@@ -132,7 +122,6 @@ func factories(dim, n int) []indexFactory {
 				return index.NewHNSWIndex(d, hnswM, efConstruction, ef, core.Euclidean)
 			},
 			trained: true,
-			skipAt:  1_000_000,
 		},
 		{
 			name: "IVF",
@@ -155,9 +144,27 @@ func benchOne(f indexFactory, vecs []core.Vector, queries []core.Vector, k int, 
 			t.Train(vecs)
 		}
 	}
-	for i, v := range vecs {
-		idx.AddVector(idFor(i), v)
+	nInsert := runtime.NumCPU()
+	insertChunk := (len(vecs) + nInsert - 1) / nInsert
+	var insertWg sync.WaitGroup
+	for w := 0; w < nInsert; w++ {
+		start := w * insertChunk
+		end := start + insertChunk
+		if end > len(vecs) {
+			end = len(vecs)
+		}
+		if start >= end {
+			continue
+		}
+		insertWg.Add(1)
+		go func(start, end int) {
+			defer insertWg.Done()
+			for i := start; i < end; i++ {
+				idx.AddVector(idFor(i), vecs[i])
+			}
+		}(start, end)
 	}
+	insertWg.Wait()
 	buildMs := float64(time.Since(t0).Milliseconds())
 
 	for i := 0; i < 2 && i < len(queries); i++ {
@@ -481,14 +488,14 @@ makeBarChart('buildChart',  'buildMs',  'ms');
 </html>`
 
 type tmplData struct {
-	Dim      int
-	TopK     int
-	Queries  int
-	Date     string
+	Dim       int
+	TopK      int
+	Queries   int
+	Date      string
 	SizesJSON template.JS
 	IdxsJSON  template.JS
 	DataJSON  template.JS
-	LastN    int
+	LastN     int
 }
 
 func toJSON(v any) template.JS {
