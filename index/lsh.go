@@ -138,20 +138,33 @@ func (l *LSHIndex) DeleteVector(id string) bool {
 	return true
 }
 
+// maxCandidateFrac caps the LSH candidate set as a fraction of the index size
+// to prevent degeneration into a full scan on large datasets.
+// 40% coverage: enough for good recall, bounded to avoid linear-scan cost.
+const maxCandidateFrac = 0.40
+
 func (l *LSHIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	maxCands := int(float64(l.pool.Len()) * maxCandidateFrac)
+	if maxCands < 1000 {
+		maxCands = 1000
+	}
 	seen := make(map[int32]bool)
-	var candidates []int32
+	candidates := make([]int32, 0, maxCands)
 	q := query.Embeddings
 
+outer:
 	for i := range l.tables {
 		h := l.hashVec(&l.tables[i], q)
 		for _, slot := range l.tables[i].buckets[h] {
 			if !seen[slot] {
 				seen[slot] = true
 				candidates = append(candidates, slot)
+				if len(candidates) >= maxCands {
+					break outer
+				}
 			}
 		}
 		for _, mask := range l.perturbMasks {
@@ -159,6 +172,9 @@ func (l *LSHIndex) Search(query core.Vector, topK int) []core.SearchResult {
 				if !seen[slot] {
 					seen[slot] = true
 					candidates = append(candidates, slot)
+					if len(candidates) >= maxCands {
+						break outer
+					}
 				}
 			}
 		}
