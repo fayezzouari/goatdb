@@ -47,16 +47,9 @@ func NewIVFIndex(dim, nClusters, nProbe int, metric core.DistanceMetric) *IVFInd
 	}
 }
 
-// l2sq returns the squared euclidean distance between two float32 slices.
-// Used internally for k-means (metric-agnostic centroid assignment).
-func l2sq(a, b []float32) float32 {
-	var d float32
-	for i := range a {
-		diff := a[i] - b[i]
-		d += diff * diff
-	}
-	return d
-}
+// l2sq returns the squared euclidean distance, dispatching to AVX2 when available.
+// Used for k-means centroid assignment (metric-agnostic, no sqrt needed).
+func l2sq(a, b []float32) float32 { return core.L2SqSlices(a, b) }
 
 // centroid returns the flat slice for cluster c.
 func (idx *IVFIndex) centroid(c int) []float32 {
@@ -112,6 +105,10 @@ func kmeansppInit(vectors []core.Vector, k int) []float32 {
 	return centroids
 }
 
+// ivfMaxTrainVecs caps the number of vectors used for IVF k-means training.
+// Beyond ~200k, centroid quality improves only marginally while cost grows linearly.
+const ivfMaxTrainVecs = 200_000
+
 func (idx *IVFIndex) Train(vectors []core.Vector) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -122,17 +119,28 @@ func (idx *IVFIndex) Train(vectors []core.Vector) {
 		idx.lists = make([]ivfList, idx.nClusters)
 	}
 
-	idx.centroids = kmeansppInit(vectors, idx.nClusters)
+	// Subsample for large datasets.
+	train := vectors
+	if len(train) > ivfMaxTrainVecs {
+		perm := rand.Perm(len(vectors))[:ivfMaxTrainVecs]
+		train = make([]core.Vector, ivfMaxTrainVecs)
+		for i, p := range perm {
+			train[i] = vectors[p]
+		}
+	}
 
-	assignments := make([]int, n)
+	idx.centroids = kmeansppInit(train, idx.nClusters)
+
+	nt := len(train)
+	assignments := make([]int, nt)
 	newCentroids := make([]float32, idx.nClusters*idx.dim)
 	counts := make([]int, idx.nClusters)
 
 	numWorkers := runtime.NumCPU()
-	chunkSize := (n + numWorkers - 1) / numWorkers
+	chunkSize := (nt + numWorkers - 1) / numWorkers
 
 	for iter := 0; iter < 30; iter++ {
-		// Assignment step — parallelised.
+		// Assignment step — parallelised over the training subsample.
 		var wg sync.WaitGroup
 		changed := make([]bool, numWorkers)
 		for w := 0; w < numWorkers; w++ {
@@ -140,13 +148,13 @@ func (idx *IVFIndex) Train(vectors []core.Vector) {
 			go func(w, start, end int) {
 				defer wg.Done()
 				for i := start; i < end; i++ {
-					c := idx.nearestCentroid(vectors[i].Embeddings)
+					c := idx.nearestCentroid(train[i].Embeddings)
 					if assignments[i] != c {
 						assignments[i] = c
 						changed[w] = true
 					}
 				}
-			}(w, w*chunkSize, min(n, (w+1)*chunkSize))
+			}(w, w*chunkSize, min(nt, (w+1)*chunkSize))
 		}
 		wg.Wait()
 
@@ -168,7 +176,7 @@ func (idx *IVFIndex) Train(vectors []core.Vector) {
 		for i := range counts {
 			counts[i] = 0
 		}
-		for i, v := range vectors {
+		for i, v := range train {
 			c := assignments[i]
 			counts[c]++
 			base := c * idx.dim
