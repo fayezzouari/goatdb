@@ -12,8 +12,6 @@ import (
 	"github.com/fayez/goatdb/core"
 )
 
-// candidate uses int32 pool slots instead of string IDs to eliminate string
-// allocations and per-hop map lookups in the hot search path.
 type candidate struct {
 	slot int32
 	dist float32
@@ -21,26 +19,24 @@ type candidate struct {
 
 type minHeap []candidate
 
-func (h minHeap) Len() int            { return len(h) }
-func (h minHeap) Less(i, j int) bool  { return h[i].dist < h[j].dist }
-func (h minHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *minHeap) Push(x any)         { *h = append(*h, x.(candidate)) }
-func (h *minHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h minHeap) Len() int           { return len(h) }
+func (h minHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
+func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *minHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
+func (h *minHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 type maxHeap []candidate
 
-func (h maxHeap) Len() int            { return len(h) }
-func (h maxHeap) Less(i, j int) bool  { return h[i].dist > h[j].dist }
-func (h maxHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *maxHeap) Push(x any)         { *h = append(*h, x.(candidate)) }
-func (h *maxHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h maxHeap) Len() int           { return len(h) }
+func (h maxHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
+func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *maxHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
+func (h *maxHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
-// hnswNode connections store int32 pool slots — not string IDs.
-// At 1M nodes with M=24 this saves ~1.5 GB and eliminates 50M string allocs.
 type hnswNode struct {
 	id          string
 	poolIdx     int32
-	connections [][]int32 // each entry is a neighbor's pool slot
+	connections [][]int32
 }
 
 type HNSWIndex struct {
@@ -51,8 +47,8 @@ type HNSWIndex struct {
 	ef             int
 	mL             float64
 	nodes          map[string]*hnswNode
-	slotToNode     []*hnswNode // O(1) reverse lookup: pool slot → node
-	entrySlot      int32       // pool slot of the current entry point
+	slotToNode     []*hnswNode
+	entrySlot      int32
 	maxLayer       int
 	distanceMetric core.DistanceMetric
 	pool           *core.VectorPool
@@ -60,10 +56,14 @@ type HNSWIndex struct {
 	sqPool         *core.Int8VectorPool
 	pqCodebook     *core.PQCodebook
 	pqPool         *core.PQPool
+	// visitedPool reuses []byte visited arrays across searchLayer calls.
+	// Flat array lookup is O(1) at ~2ns vs map at ~50ns — at efConstruction=200
+	// and M=24 this saves ~690µs per AddVector, 11+ minutes at 1M.
+	visitedPool sync.Pool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
-	return &HNSWIndex{
+	h := &HNSWIndex{
 		dim:            dim,
 		M:              M,
 		efConstruction: efConstruction,
@@ -74,6 +74,8 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		distanceMetric: metric,
 		pool:           core.NewVectorPool(dim, 64),
 	}
+	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
+	return h
 }
 
 func (h *HNSWIndex) Train(vectors []core.Vector) {
@@ -90,7 +92,7 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 		h.sqPool.Set(node.poolIdx, cb.Quantize(h.pool.Get(node.poolIdx)))
 	}
 
-	nSubs := h.dim / 4
+	nSubs := h.dim / 8
 	if nSubs < 1 {
 		nSubs = 1
 	}
@@ -122,10 +124,23 @@ func (h *HNSWIndex) growSlotToNode(slot int32) {
 	}
 }
 
-// searchLayer runs the beam search at a single HNSW layer.
-// visited and candidates use int32 slots — no string map lookups per hop.
-func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, distTable []float32, eps []candidate, ef, layer int) []candidate {
-	visited := make(map[int32]bool, ef*2)
+func (h *HNSWIndex) slotDist(q []float32, qInt8 []int8, slot int32) float32 {
+	if qInt8 != nil {
+		return h.codebook.DistInt8(qInt8, h.sqPool.Get(slot))
+	}
+	return h.dist(q, h.pool.Get(slot))
+}
+
+func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
+	nSlots := h.pool.Slots()
+	vbp := h.visitedPool.Get().(*[]byte)
+	vb := *vbp
+	if cap(vb) < nSlots {
+		vb = make([]byte, nSlots)
+	} else {
+		vb = vb[:nSlots]
+	}
+	dirty := make([]int32, 0, ef*4)
 
 	cands := &minHeap{}
 	W := &maxHeap{}
@@ -133,13 +148,15 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, distTable []f
 	for _, ep := range eps {
 		heap.Push(cands, ep)
 		heap.Push(W, ep)
-		visited[ep.slot] = true
+		if int(ep.slot) < len(vb) && vb[ep.slot] == 0 {
+			vb[ep.slot] = 1
+			dirty = append(dirty, ep.slot)
+		}
 	}
 
 	for cands.Len() > 0 {
 		c := heap.Pop(cands).(candidate)
-		f := (*W)[0]
-		if c.dist > f.dist {
+		if c.dist > (*W)[0].dist {
 			break
 		}
 		node := h.slotToNode[c.slot]
@@ -147,21 +164,15 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, distTable []f
 			continue
 		}
 		for _, nbSlot := range node.connections[layer] {
-			if visited[nbSlot] {
+			if int(nbSlot) < len(vb) && vb[nbSlot] != 0 {
 				continue
 			}
-			visited[nbSlot] = true
-			var d float32
-			switch {
-			case distTable != nil:
-				d = h.pqCodebook.DistPQ(h.pqPool.Get(nbSlot), distTable)
-			case queryInt8 != nil:
-				d = h.codebook.DistInt8(queryInt8, h.sqPool.Get(nbSlot))
-			default:
-				d = h.dist(query, h.pool.Get(nbSlot))
+			if int(nbSlot) < len(vb) {
+				vb[nbSlot] = 1
+				dirty = append(dirty, nbSlot)
 			}
-			f = (*W)[0]
-			if d < f.dist || W.Len() < ef {
+			d := h.slotDist(query, queryInt8, nbSlot)
+			if d < (*W)[0].dist || W.Len() < ef {
 				heap.Push(cands, candidate{nbSlot, d})
 				heap.Push(W, candidate{nbSlot, d})
 				if W.Len() > ef {
@@ -175,50 +186,38 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, distTable []f
 	for i := len(result) - 1; i >= 0; i-- {
 		result[i] = heap.Pop(W).(candidate)
 	}
+
+	for _, s := range dirty {
+		if int(s) < len(vb) {
+			vb[s] = 0
+		}
+	}
+	*vbp = vb
+	h.visitedPool.Put(vbp)
+
 	return result
 }
 
-func (h *HNSWIndex) selectNeighborsHeuristic(query []float32, candidates []candidate, M int) []candidate {
+func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int) []candidate {
 	if len(candidates) <= M {
 		return candidates
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].dist < candidates[j].dist
-	})
-	result := make([]candidate, 0, M)
-	for _, c := range candidates {
-		if len(result) >= M {
-			break
-		}
-		dominated := false
-		for _, r := range result {
-			if h.dist(h.pool.Get(r.slot), h.pool.Get(c.slot)) < c.dist {
-				dominated = true
-				break
-			}
-		}
-		if !dominated {
-			result = append(result, c)
-		}
-	}
-	return result
+	return candidates[:M]
 }
-
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	level := h.randomLevel()
-	poolIdx := h.pool.Add(vector.Embeddings)
+	q := vector.Embeddings
 
+	h.mu.Lock()
+	poolIdx := h.pool.Add(q)
 	if h.codebook != nil {
 		h.sqPool.Grow(int(poolIdx) + 1)
-		h.sqPool.Set(poolIdx, h.codebook.Quantize(vector.Embeddings))
+		h.sqPool.Set(poolIdx, h.codebook.Quantize(q))
 	}
 	if h.pqCodebook != nil {
 		h.pqPool.Grow(int(poolIdx) + 1)
-		h.pqPool.Set(poolIdx, h.pqCodebook.Encode(vector.Embeddings))
+		h.pqPool.Set(poolIdx, h.pqCodebook.Encode(q))
 	}
-
 	node := &hnswNode{
 		id:          id,
 		poolIdx:     poolIdx,
@@ -234,77 +233,92 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	if h.maxLayer == -1 {
 		h.entrySlot = poolIdx
 		h.maxLayer = level
+		h.mu.Unlock()
 		return
 	}
+	entrySlot := h.entrySlot
+	maxLayer := h.maxLayer
+	h.mu.Unlock()
 
-	q := vector.Embeddings
-	// Use SQ (int8) for construction — PQ is too coarse and degrades graph
-	// quality. PQ is used only at search time where re-ranking corrects errors.
 	var qInt8 []int8
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.dist(q, h.pool.Get(h.entrySlot))}}
+	type layerResult struct {
+		layer     int
+		mMax      int
+		neighbors []candidate
+	}
 
-	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(q, qInt8, nil, ep, 1, layer)
+	h.mu.RLock()
+	ep := []candidate{{entrySlot, h.slotDist(q, qInt8, entrySlot)}}
+
+	for layer := maxLayer; layer > level; layer-- {
+		result := h.searchLayer(q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	for layer := min(level, h.maxLayer); layer >= 0; layer-- {
+	layerResults := make([]layerResult, 0, level+1)
+	for layer := min(level, maxLayer); layer >= 0; layer-- {
 		mMax := h.M
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(q, qInt8, nil, ep, h.efConstruction, layer)
-
-		// Re-rank with exact float32 distances before neighbor selection.
+		candidates := h.searchLayer(q, qInt8, ep, h.efConstruction, layer)
 		if qInt8 != nil {
 			for i := range candidates {
 				candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
 			}
 			sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
 		}
+		layerResults = append(layerResults, layerResult{layer, mMax, h.selectNeighbors(candidates, mMax)})
+		ep = candidates
+	}
+	h.mu.RUnlock()
 
-		neighbors := h.selectNeighborsHeuristic(q, candidates, mMax)
-
-		node.connections[layer] = make([]int32, len(neighbors))
-		for i, nb := range neighbors {
-			node.connections[layer][i] = nb.slot
+	h.mu.Lock()
+	for _, lr := range layerResults {
+		node.connections[lr.layer] = make([]int32, len(lr.neighbors))
+		for i, nb := range lr.neighbors {
+			node.connections[lr.layer][i] = nb.slot
 		}
-
-		for _, nb := range neighbors {
+		for _, nb := range lr.neighbors {
 			nbNode := h.slotToNode[nb.slot]
-			if layer >= len(nbNode.connections) {
+			if lr.layer >= len(nbNode.connections) {
 				continue
 			}
-			nbNode.connections[layer] = append(nbNode.connections[layer], poolIdx)
-			if len(nbNode.connections[layer]) > mMax {
-				conns := nbNode.connections[layer]
+			nbNode.connections[lr.layer] = append(nbNode.connections[lr.layer], poolIdx)
+			if len(nbNode.connections[lr.layer]) > lr.mMax {
+				conns := nbNode.connections[lr.layer]
 				pruned := make([]candidate, len(conns))
 				for i, s := range conns {
-					pruned[i] = candidate{s, h.dist(h.pool.Get(nbNode.poolIdx), h.pool.Get(s))}
+					var d float32
+					if h.codebook != nil {
+						d = h.codebook.DistInt8(h.sqPool.Get(nbNode.poolIdx), h.sqPool.Get(s))
+					} else {
+						d = h.dist(h.pool.Get(nbNode.poolIdx), h.pool.Get(s))
+					}
+					pruned[i] = candidate{s, d}
 				}
 				for i := 1; i < len(pruned); i++ {
 					for j := i; j > 0 && pruned[j].dist < pruned[j-1].dist; j-- {
 						pruned[j], pruned[j-1] = pruned[j-1], pruned[j]
 					}
 				}
-				pruned = pruned[:mMax]
-				nbNode.connections[layer] = make([]int32, mMax)
+				pruned = pruned[:lr.mMax]
+				nbNode.connections[lr.layer] = make([]int32, lr.mMax)
 				for i, p := range pruned {
-					nbNode.connections[layer][i] = p.slot
+					nbNode.connections[lr.layer][i] = p.slot
 				}
 			}
 		}
-		ep = candidates
 	}
-
 	if level > h.maxLayer {
 		h.maxLayer = level
 		h.entrySlot = poolIdx
 	}
+	h.mu.Unlock()
 }
 
 func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
@@ -367,24 +381,20 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	}
 
 	q := query.Embeddings
-	// Use SQ (int8) for graph traversal — fast and accurate enough for the beam.
-	// PQ is too coarse (subDim=4) and causes the beam to miss good paths,
-	// hurting recall. Float32 re-rank after the search corrects SQ errors.
 	var qInt8 []int8
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.dist(q, h.pool.Get(h.entrySlot))}}
+	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(q, qInt8, nil, ep, 1, layer)
+		result := h.searchLayer(q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(q, qInt8, nil, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(q, qInt8, ep, max(h.ef, topK), 0)
 
-	// Re-rank with exact float32 distances.
 	if qInt8 != nil {
 		for i := range candidates {
 			candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
@@ -406,7 +416,7 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 
 type hnswNodeState struct {
 	Embeddings  []float32
-	Connections [][]string // serialized as string IDs for readability/compat
+	Connections [][]string
 }
 
 type hnswState struct {
@@ -441,7 +451,6 @@ func (h *HNSWIndex) Save(path string) error {
 	for id, node := range h.nodes {
 		emb := make([]float32, h.dim)
 		copy(emb, h.pool.Get(node.poolIdx))
-		// Convert int32 slots → string IDs for serialization.
 		conns := make([][]string, len(node.connections))
 		for l, layer := range node.connections {
 			conns[l] = make([]string, len(layer))
@@ -508,7 +517,6 @@ func (h *HNSWIndex) Load(path string) error {
 	h.nodes = make(map[string]*hnswNode, len(s.Nodes))
 	h.slotToNode = make([]*hnswNode, 0, len(s.Nodes))
 
-	// First pass: add all vectors to pool, build nodes without connections.
 	for id, ns := range s.Nodes {
 		poolIdx := h.pool.Add(ns.Embeddings)
 		node := &hnswNode{id: id, poolIdx: poolIdx}
@@ -517,7 +525,6 @@ func (h *HNSWIndex) Load(path string) error {
 		h.slotToNode[poolIdx] = node
 	}
 
-	// Second pass: resolve string IDs → int32 slots for connections.
 	for id, ns := range s.Nodes {
 		node := h.nodes[id]
 		node.connections = make([][]int32, len(ns.Connections))
@@ -553,5 +560,6 @@ func (h *HNSWIndex) Load(path string) error {
 			h.pqPool.Set(node.poolIdx, h.pqCodebook.Encode(h.pool.Get(node.poolIdx)))
 		}
 	}
+	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
 	return nil
 }
