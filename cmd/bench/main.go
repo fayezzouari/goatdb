@@ -4,10 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"math"
 	"math/rand"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fayez/goatdb/core"
@@ -21,7 +24,7 @@ var (
 	flagOut     = flag.String("out", "bench.html", "output HTML file")
 )
 
-var datasetSizes = []int{1_000, 5_000, 10_000}
+var datasetSizes = []int{10_000, 100_000, 1_000_000}
 
 type result struct {
 	index     string
@@ -52,11 +55,7 @@ func percentile(sorted []float64, p float64) float64 {
 	return sorted[idx]
 }
 
-func groundTruth(vecs []core.Vector, query core.Vector, k int, metric core.DistanceMetric) map[string]struct{} {
-	flat := index.NewFlatIndex(len(query.Embeddings), metric)
-	for i, v := range vecs {
-		flat.AddVector(idFor(i), v)
-	}
+func groundTruth(flat core.Index, query core.Vector, k int) map[string]struct{} {
 	results := flat.Search(query, k)
 	set := make(map[string]struct{}, len(results))
 	for _, r := range results {
@@ -69,9 +68,55 @@ type indexFactory struct {
 	name    string
 	build   func(dim int) core.Index
 	trained bool
+	skipAt  int // skip this index for n >= skipAt (0 = never skip)
 }
 
-func factories(dim int) []indexFactory {
+func factories(dim, n int) []indexFactory {
+	// HNSW params must balance recall and build time.
+	// At 1M each AddVector does O(ef×M×layers) random hops into a pool that
+	// exceeds L3 cache, so every hop is a ~100ns DRAM miss. Keep params small
+	// enough that the full build completes in a few minutes.
+	hnswM := 16
+	efConstruction := 200
+	ef := 128
+	if n >= 100_000 {
+		hnswM = 24
+		efConstruction = 200
+		ef = 350
+	}
+	if n >= 1_000_000 {
+		hnswM = 12
+		efConstruction = 64
+		ef = 200
+	}
+
+	// IVF: nClusters ~ sqrt(N), capped to keep k-means training tractable.
+	nClusters := int(math.Sqrt(float64(n)))
+	if nClusters < 16 {
+		nClusters = 16
+	}
+	if nClusters > 256 {
+		nClusters = 256
+	}
+	// nProbe/nClusters controls the recall/speed trade-off.
+	// At 10k: sqrt(10k)=100 clusters, /4=25 probes → 25% coverage.
+	// At 100k: capped at 256 clusters, /4=64 probes → 25k comparisons/query.
+	nProbe := nClusters / 4
+	if nProbe < 10 {
+		nProbe = 10
+	}
+
+	// LSH: K=8 gives 256 buckets → ~390 vectors/bucket at 100k, ~3900 at 1M.
+	// More tables compensate for lower per-table collision probability at scale.
+	lshK := 8
+	lshL := 20
+	if n >= 100_000 {
+		lshL = 30
+	}
+	if n >= 1_000_000 {
+		lshL = 40
+	}
+
 	return []indexFactory{
 		{
 			name:  "Flat",
@@ -79,29 +124,30 @@ func factories(dim int) []indexFactory {
 		},
 		{
 			name:  "LSH",
-			build: func(d int) core.Index { return index.NewLSHIndex(d, 20, 8, core.Euclidean) },
+			build: func(d int) core.Index { return index.NewLSHIndex(d, lshL, lshK, core.Euclidean) },
 		},
 		{
 			name: "HNSW",
 			build: func(d int) core.Index {
-				return index.NewHNSWIndex(d, 16, 200, 128, core.Euclidean)
+				return index.NewHNSWIndex(d, hnswM, efConstruction, ef, core.Euclidean)
 			},
+			trained: true,
+			skipAt:  1_000_000,
 		},
 		{
 			name: "IVF",
 			build: func(d int) core.Index {
-				return index.NewIVFIndex(d, 16, 8, core.Euclidean)
+				return index.NewIVFIndex(d, nClusters, nProbe, core.Euclidean)
 			},
 			trained: true,
 		},
 	}
 }
 
-func benchOne(f indexFactory, vecs []core.Vector, queries []core.Vector, k int) result {
+func benchOne(f indexFactory, vecs []core.Vector, queries []core.Vector, k int, gtFlat core.Index) result {
 	dim := len(vecs[0].Embeddings)
 	n := len(vecs)
 
-	// Build
 	t0 := time.Now()
 	idx := f.build(dim)
 	if f.trained {
@@ -118,29 +164,58 @@ func benchOne(f indexFactory, vecs []core.Vector, queries []core.Vector, k int) 
 		idx.Search(queries[i], k)
 	}
 
+	type qresult struct {
+		latencyUs float64
+		recall    float64
+	}
+	qresults := make([]qresult, len(queries))
+
+	nWorkers := runtime.NumCPU()
+	chunkSize := (len(queries) + nWorkers - 1) / nWorkers
+	var wg sync.WaitGroup
+	wallStart := time.Now()
+	for w := 0; w < nWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > len(queries) {
+			end = len(queries)
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			for qi := start; qi < end; qi++ {
+				gt := groundTruth(gtFlat, queries[qi], k)
+				ts := time.Now()
+				res := idx.Search(queries[qi], k)
+				qresults[qi].latencyUs = float64(time.Since(ts).Nanoseconds()) / 1e3
+				hits := 0
+				for _, r := range res {
+					if _, ok := gt[r.Id]; ok {
+						hits++
+					}
+				}
+				if len(gt) > 0 {
+					qresults[qi].recall = float64(hits) / float64(len(gt))
+				}
+			}
+		}(start, end)
+	}
+	wg.Wait()
+	wallElapsed := time.Since(wallStart)
+
 	latencies := make([]float64, len(queries))
 	var totalRecall float64
-	for qi, q := range queries {
-		gt := groundTruth(vecs, q, k, core.Euclidean)
-
-		ts := time.Now()
-		res := idx.Search(q, k)
-		latencies[qi] = float64(time.Since(ts).Nanoseconds()) / 1e3
-
-		hits := 0
-		for _, r := range res {
-			if _, ok := gt[r.Id]; ok {
-				hits++
-			}
-		}
-		if len(gt) > 0 {
-			totalRecall += float64(hits) / float64(len(gt))
-		}
+	for i, qr := range qresults {
+		latencies[i] = qr.latencyUs
+		totalRecall += qr.recall
 	}
 
 	sort.Float64s(latencies)
-	avgLatencyUs := percentile(latencies, 50)
-	qps := 1e6 / avgLatencyUs
+	// QPS = actual parallel throughput (total queries / wall-clock time).
+	qps := float64(len(queries)) / wallElapsed.Seconds()
 
 	return result{
 		index:    f.name,
@@ -167,9 +242,29 @@ func runAll(dim, k, nQueries int) []result {
 		for i := range vecs {
 			vecs[i] = randVec(dim)
 		}
-		for _, f := range factories(dim) {
+
+		// build flat index once — reused for ground truth across all index types
+		fmt.Printf("  building ground truth index...\n")
+		gtFlat := index.NewFlatIndex(dim, core.Euclidean)
+		for i, v := range vecs {
+			gtFlat.AddVector(idFor(i), v)
+		}
+
+		// cap queries for large datasets to keep runtime sane
+		q := queries
+		if n >= 500_000 && len(q) > 100 {
+			q = q[:100]
+		} else if n >= 100_000 && len(q) > 200 {
+			q = q[:200]
+		}
+
+		for _, f := range factories(dim, n) {
+			if f.skipAt > 0 && n >= f.skipAt {
+				fmt.Printf("  %-6s ... (skipped — build time not feasible at n=%d)\n", f.name, n)
+				continue
+			}
 			fmt.Printf("  %-6s ...", f.name)
-			r := benchOne(f, vecs, queries, k)
+			r := benchOne(f, vecs, q, k, gtFlat)
 			fmt.Printf(" recall=%.1f%% qps=%.0f p50=%.0fµs\n", r.recallAt, r.qps, r.p50Us)
 			results = append(results, r)
 		}
@@ -198,6 +293,43 @@ canvas{max-height:280px}
 <body>
 <h1>GoatDB — ANN Benchmark Report</h1>
 <p class="sub">dim={{.Dim}} &nbsp;|&nbsp; top-K={{.TopK}} &nbsp;|&nbsp; queries={{.Queries}} &nbsp;|&nbsp; {{.Date}}</p>
+
+<div class="card" style="margin-bottom:24px">
+<h2>Industry Targets (dim=128, Euclidean)</h2>
+<table style="width:100%;border-collapse:collapse;font-size:.82rem;margin-top:8px">
+<thead><tr style="color:#94a3b8;text-align:left;border-bottom:1px solid #2d3148">
+  <th style="padding:6px 12px">Scale</th>
+  <th style="padding:6px 12px">Recall@10 baseline</th>
+  <th style="padding:6px 12px">QPS baseline</th>
+  <th style="padding:6px 12px">QPS top-tier</th>
+  <th style="padding:6px 12px">Source</th>
+</tr></thead>
+<tbody>
+  <tr style="border-bottom:1px solid #2d3148">
+    <td style="padding:6px 12px">10k</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 90%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 2,000</span></td>
+    <td style="padding:6px 12px">5,000+</td>
+    <td style="padding:6px 12px;color:#64748b">ANN-Benchmarks guidelines</td>
+  </tr>
+  <tr style="border-bottom:1px solid #2d3148">
+    <td style="padding:6px 12px">100k</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 90%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 500</span></td>
+    <td style="padding:6px 12px">10,000+</td>
+    <td style="padding:6px 12px;color:#64748b">Weaviate / Qdrant published</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 12px">1M (SIFT-1M)</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 95%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 500</span></td>
+    <td style="padding:6px 12px">10,940 (Weaviate HNSW)</td>
+    <td style="padding:6px 12px;color:#64748b">Weaviate ANN Benchmarks</td>
+  </tr>
+</tbody>
+</table>
+<p class="meta" style="margin-top:8px">Baseline = minimum acceptable for production. Top-tier = Weaviate/Pinecone on optimised hardware with SIMD. GoatDB is pure Go — gap is expected.</p>
+</div>
 
 <div class="grid">
 
@@ -266,7 +398,11 @@ const barOpts = (title) => ({
   }
 });
 
-function makeBarChart(id, field, title){
+// target lines per dataset size: {n -> target value}
+const RECALL_TARGETS = { 10000: 90, 100000: 90, 1000000: 95 };
+const QPS_TARGETS    = { 10000: 2000, 100000: 500, 1000000: 500 };
+
+function makeBarChart(id, field, title, targets){
   const labels = SIZES.map(n => n>=1000 ? n/1000+'k' : ''+n);
   const datasets = IDXS.map(idx => ({
     label: idx,
@@ -276,13 +412,26 @@ function makeBarChart(id, field, title){
     borderWidth:1,
     borderRadius:4,
   }));
+  if (targets) {
+    datasets.push({
+      label: 'Baseline target',
+      data: SIZES.map(n => targets[n] || null),
+      type: 'line',
+      borderColor: '#f87171',
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      fill: false,
+      order: -1,
+    });
+  }
   new Chart(document.getElementById(id), {
     type:'bar', data:{labels, datasets}, options: barOpts(title)
   });
 }
 
-makeBarChart('recallChart', 'recallAt', 'Recall (%)');
-makeBarChart('qpsChart',    'qps',      'QPS');
+makeBarChart('recallChart', 'recallAt', 'Recall (%)', RECALL_TARGETS);
+makeBarChart('qpsChart',    'qps',      'QPS',        QPS_TARGETS);
 makeBarChart('p50Chart',    'p50Us',    'µs');
 makeBarChart('buildChart',  'buildMs',  'ms');
 
