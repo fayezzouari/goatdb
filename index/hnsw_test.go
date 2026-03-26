@@ -1,6 +1,8 @@
 package index
 
 import (
+	"fmt"
+	"math/rand"
 	"testing"
 
 	"github.com/fayez/goatdb/core"
@@ -101,5 +103,101 @@ func TestHNSWIndexSaveLoad(t *testing.T) {
 	results := idx2.Search(core.Vector{Embeddings: []float32{1, 0}}, 1)
 	if len(results) == 0 || results[0].Id != "a" {
 		t.Errorf("expected 'a' after load, got %v", results)
+	}
+}
+
+func TestHNSWRecallWithCodebook(t *testing.T) {
+	const n, dim, topK = 1000, 128, 10
+	rand.Seed(42)
+
+	vecs := make([]core.Vector, n)
+	for i := range vecs {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = rand.Float32()*2 - 1
+		}
+		vecs[i] = core.Vector{Embeddings: emb}
+	}
+
+	// flat ground truth
+	flat := NewFlatIndex(dim, core.Euclidean)
+	for i, v := range vecs {
+		flat.AddVector(fmt.Sprintf("v%d", i), v)
+	}
+
+	// HNSW with Train-before-AddVector (mirrors benchmark)
+	hnsw := NewHNSWIndex(dim, 16, 200, 128, core.Euclidean)
+	hnsw.Train(vecs)
+	for i, v := range vecs {
+		hnsw.AddVector(fmt.Sprintf("v%d", i), v)
+	}
+
+	query := core.Vector{Embeddings: vecs[0].Embeddings}
+	gtResults := flat.Search(query, topK)
+	gt := make(map[string]struct{}, len(gtResults))
+	for _, r := range gtResults {
+		gt[r.Id] = struct{}{}
+	}
+
+	hnswResults := hnsw.Search(query, topK)
+	hits := 0
+	for _, r := range hnswResults {
+		if _, ok := gt[r.Id]; ok {
+			hits++
+		}
+	}
+	recall := float64(hits) / float64(len(gt))
+	t.Logf("recall@%d = %.1f%% (%d/%d)", topK, recall*100, hits, len(gt))
+	if recall < 0.5 {
+		t.Errorf("recall too low: %.1f%% (expected >= 50%%)", recall*100)
+	}
+}
+
+func TestHNSWRecallNoCodebook(t *testing.T) {
+	const n, dim, topK = 1000, 128, 10
+	rand.Seed(42)
+
+	vecs := make([]core.Vector, n)
+	for i := range vecs {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = rand.Float32()*2 - 1
+		}
+		vecs[i] = core.Vector{Embeddings: emb}
+	}
+
+	flat := NewFlatIndex(dim, core.Euclidean)
+	for i, v := range vecs {
+		flat.AddVector(fmt.Sprintf("v%d", i), v)
+	}
+
+	// HNSW WITHOUT Train (no codebook)
+	hnsw := NewHNSWIndex(dim, 16, 200, 128, core.Euclidean)
+	for i, v := range vecs {
+		hnsw.AddVector(fmt.Sprintf("v%d", i), v)
+	}
+
+	var totalRecall float64
+	const nq = 50
+	for qi := 0; qi < nq; qi++ {
+		query := vecs[qi]
+		gtResults := flat.Search(query, topK)
+		gt := make(map[string]struct{}, len(gtResults))
+		for _, r := range gtResults {
+			gt[r.Id] = struct{}{}
+		}
+		hnswResults := hnsw.Search(query, topK)
+		hits := 0
+		for _, r := range hnswResults {
+			if _, ok := gt[r.Id]; ok {
+				hits++
+			}
+		}
+		totalRecall += float64(hits) / float64(len(gt))
+	}
+	recall := totalRecall / nq
+	t.Logf("avg recall@%d (no codebook) = %.1f%%", topK, recall*100)
+	if recall < 0.5 {
+		t.Errorf("recall too low: %.1f%%", recall*100)
 	}
 }
