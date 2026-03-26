@@ -18,7 +18,44 @@ canvas{max-height:280px}
 </head>
 <body>
 <h1>GoatDB — ANN Benchmark Report</h1>
-<p class="sub">dim=128 &nbsp;|&nbsp; top-K=10 &nbsp;|&nbsp; queries=500 &nbsp;|&nbsp; 2026-03-22 18:13 UTC</p>
+<p class="sub">dim=128 &nbsp;|&nbsp; top-K=10 &nbsp;|&nbsp; queries=500 &nbsp;|&nbsp; 2026-03-23 11:41 UTC</p>
+
+<div class="card" style="margin-bottom:24px">
+<h2>Industry Targets (dim=128, Euclidean)</h2>
+<table style="width:100%;border-collapse:collapse;font-size:.82rem;margin-top:8px">
+<thead><tr style="color:#94a3b8;text-align:left;border-bottom:1px solid #2d3148">
+  <th style="padding:6px 12px">Scale</th>
+  <th style="padding:6px 12px">Recall@10 baseline</th>
+  <th style="padding:6px 12px">QPS baseline</th>
+  <th style="padding:6px 12px">QPS top-tier</th>
+  <th style="padding:6px 12px">Source</th>
+</tr></thead>
+<tbody>
+  <tr style="border-bottom:1px solid #2d3148">
+    <td style="padding:6px 12px">10k</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 90%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 2,000</span></td>
+    <td style="padding:6px 12px">5,000+</td>
+    <td style="padding:6px 12px;color:#64748b">ANN-Benchmarks guidelines</td>
+  </tr>
+  <tr style="border-bottom:1px solid #2d3148">
+    <td style="padding:6px 12px">100k</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 90%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 500</span></td>
+    <td style="padding:6px 12px">10,000+</td>
+    <td style="padding:6px 12px;color:#64748b">Weaviate / Qdrant published</td>
+  </tr>
+  <tr>
+    <td style="padding:6px 12px">1M (SIFT-1M)</td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 95%</span></td>
+    <td style="padding:6px 12px"><span style="color:#34d399">≥ 500</span></td>
+    <td style="padding:6px 12px">10,940 (Weaviate HNSW)</td>
+    <td style="padding:6px 12px;color:#64748b">Weaviate ANN Benchmarks</td>
+  </tr>
+</tbody>
+</table>
+<p class="meta" style="margin-top:8px">Baseline = minimum acceptable for production. Top-tier = Weaviate/Pinecone on optimised hardware with SIMD. GoatDB is pure Go — gap is expected.</p>
+</div>
 
 <div class="grid">
 
@@ -53,7 +90,7 @@ canvas{max-height:280px}
 </div>
 
 <div class="card">
-<h2>Recall vs QPS (n=10000)</h2>
+<h2>Recall vs QPS (n=1000000)</h2>
 <canvas id="tradeoffChart"></canvas>
 <p class="meta">Upper-right is better. Each point is one index type.</p>
 </div>
@@ -67,9 +104,9 @@ const COLORS = {
   HNSW:  '#f472b6',
   IVF:   '#fbbf24',
 };
-const SIZES  = [1000,5000,10000];
+const SIZES  = [10000,100000,1000000];
 const IDXS   = ["Flat","LSH","HNSW","IVF"];
-const DATA   = [{"index":"Flat","n":1000,"buildMs":0.00,"recallAt":100.00,"qps":7625.79,"p50Us":131.13,"p95Us":257.92,"p99Us":358.75},{"index":"LSH","n":1000,"buildMs":23.00,"recallAt":79.20,"qps":4183.96,"p50Us":239.01,"p95Us":489.94,"p99Us":667.63},{"index":"HNSW","n":1000,"buildMs":474.00,"recallAt":99.92,"qps":2023.16,"p50Us":494.28,"p95Us":1184.83,"p99Us":1643.85},{"index":"IVF","n":1000,"buildMs":54.00,"recallAt":76.16,"qps":11821.45,"p50Us":84.59,"p95Us":176.40,"p99Us":230.37},{"index":"Flat","n":5000,"buildMs":1.00,"recallAt":100.00,"qps":2171.66,"p50Us":460.48,"p95Us":1030.58,"p99Us":1448.86},{"index":"LSH","n":5000,"buildMs":66.00,"recallAt":83.94,"qps":1620.69,"p50Us":617.02,"p95Us":1279.01,"p99Us":1741.34},{"index":"HNSW","n":5000,"buildMs":4127.00,"recallAt":95.94,"qps":1498.41,"p50Us":667.37,"p95Us":1187.81,"p99Us":1831.80},{"index":"IVF","n":5000,"buildMs":274.00,"recallAt":72.16,"qps":3800.04,"p50Us":263.15,"p95Us":558.40,"p99Us":813.33},{"index":"Flat","n":10000,"buildMs":2.00,"recallAt":100.00,"qps":1135.09,"p50Us":880.99,"p95Us":1515.24,"p99Us":2022.57},{"index":"LSH","n":10000,"buildMs":123.00,"recallAt":85.84,"qps":803.32,"p50Us":1244.83,"p95Us":2026.74,"p99Us":3039.38},{"index":"HNSW","n":10000,"buildMs":10707.00,"recallAt":90.98,"qps":1098.90,"p50Us":910.00,"p95Us":1435.07,"p99Us":1724.77},{"index":"IVF","n":10000,"buildMs":574.00,"recallAt":72.98,"qps":2133.97,"p50Us":468.61,"p95Us":892.43,"p99Us":1173.32}];
+const DATA   = [{"index":"Flat","n":10000,"buildMs":16.00,"recallAt":100.00,"qps":9086.71,"p50Us":918.53,"p95Us":1915.27,"p99Us":3691.12},{"index":"LSH","n":10000,"buildMs":53.00,"recallAt":67.98,"qps":7082.09,"p50Us":1795.04,"p95Us":3534.92,"p99Us":4262.14},{"index":"HNSW","n":10000,"buildMs":4330.00,"recallAt":88.42,"qps":11093.87,"p50Us":867.47,"p95Us":1854.01,"p99Us":3020.76},{"index":"IVF","n":10000,"buildMs":207.00,"recallAt":59.78,"qps":10744.57,"p50Us":453.76,"p95Us":738.09,"p99Us":1035.15},{"index":"Flat","n":100000,"buildMs":125.00,"recallAt":100.00,"qps":823.93,"p50Us":8590.96,"p95Us":19174.09,"p99Us":22555.13},{"index":"LSH","n":100000,"buildMs":566.00,"recallAt":73.00,"qps":634.57,"p50Us":16191.81,"p95Us":23769.03,"p99Us":32781.51},{"index":"HNSW","n":100000,"buildMs":104267.00,"recallAt":85.60,"qps":1637.11,"p50Us":4207.28,"p95Us":7483.52,"p99Us":8428.72},{"index":"IVF","n":100000,"buildMs":2769.00,"recallAt":63.40,"qps":1207.09,"p50Us":5361.64,"p95Us":7445.08,"p99Us":7852.24},{"index":"Flat","n":1000000,"buildMs":1304.00,"recallAt":100.00,"qps":48.31,"p50Us":209266.47,"p95Us":266295.71,"p99Us":318537.03},{"index":"LSH","n":1000000,"buildMs":7173.00,"recallAt":77.60,"qps":35.26,"p50Us":346510.36,"p95Us":464760.57,"p99Us":498037.36},{"index":"HNSW","n":1000000,"buildMs":1993918.00,"recallAt":60.60,"qps":79.13,"p50Us":21284.71,"p95Us":31471.27,"p99Us":51551.12},{"index":"IVF","n":1000000,"buildMs":14508.00,"recallAt":63.60,"qps":50.99,"p50Us":123454.41,"p95Us":153670.84,"p99Us":160530.59}];
 
 function col(idx){ return COLORS[idx] || '#888' }
 
@@ -87,7 +124,11 @@ const barOpts = (title) => ({
   }
 });
 
-function makeBarChart(id, field, title){
+
+const RECALL_TARGETS = { 10000: 90, 100000: 90, 1000000: 95 };
+const QPS_TARGETS    = { 10000: 2000, 100000: 500, 1000000: 500 };
+
+function makeBarChart(id, field, title, targets){
   const labels = SIZES.map(n => n>=1000 ? n/1000+'k' : ''+n);
   const datasets = IDXS.map(idx => ({
     label: idx,
@@ -97,18 +138,31 @@ function makeBarChart(id, field, title){
     borderWidth:1,
     borderRadius:4,
   }));
+  if (targets) {
+    datasets.push({
+      label: 'Baseline target',
+      data: SIZES.map(n => targets[n] || null),
+      type: 'line',
+      borderColor: '#f87171',
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      fill: false,
+      order: -1,
+    });
+  }
   new Chart(document.getElementById(id), {
     type:'bar', data:{labels, datasets}, options: barOpts(title)
   });
 }
 
-makeBarChart('recallChart', 'recallAt', 'Recall (%)');
-makeBarChart('qpsChart',    'qps',      'QPS');
+makeBarChart('recallChart', 'recallAt', 'Recall (%)', RECALL_TARGETS);
+makeBarChart('qpsChart',    'qps',      'QPS',        QPS_TARGETS);
 makeBarChart('p50Chart',    'p50Us',    'µs');
 makeBarChart('buildChart',  'buildMs',  'ms');
 
 (function(){
-  const lastN =  10000 ;
+  const lastN =  1000000 ;
   const labels = IDXS;
   const p95 = IDXS.map(idx => val(idx, lastN, 'p95Us'));
   const p99 = IDXS.map(idx => val(idx, lastN, 'p99Us'));
@@ -126,7 +180,7 @@ makeBarChart('buildChart',  'buildMs',  'ms');
 })();
 
 (function(){
-  const lastN =  10000 ;
+  const lastN =  1000000 ;
   const datasets = IDXS.map(idx => ({
     label: idx,
     data: [{x: val(idx,lastN,'recallAt'), y: val(idx,lastN,'qps')}],

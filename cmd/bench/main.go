@@ -82,7 +82,7 @@ func factories(dim, n int) []indexFactory {
 	}
 	if n >= 1_000_000 {
 		hnswM = 24
-		efConstruction = 400
+		efConstruction = 200
 		ef = 600
 	}
 
