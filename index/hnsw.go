@@ -209,6 +209,8 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	q := vector.Embeddings
 
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	poolIdx := h.pool.Add(q)
 	if h.codebook != nil {
 		h.sqPool.Grow(int(poolIdx) + 1)
@@ -233,34 +235,22 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	if h.maxLayer == -1 {
 		h.entrySlot = poolIdx
 		h.maxLayer = level
-		h.mu.Unlock()
 		return
 	}
-	entrySlot := h.entrySlot
-	maxLayer := h.maxLayer
-	h.mu.Unlock()
 
 	var qInt8 []int8
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	type layerResult struct {
-		layer     int
-		mMax      int
-		neighbors []candidate
-	}
+	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
 
-	h.mu.RLock()
-	ep := []candidate{{entrySlot, h.slotDist(q, qInt8, entrySlot)}}
-
-	for layer := maxLayer; layer > level; layer-- {
+	for layer := h.maxLayer; layer > level; layer-- {
 		result := h.searchLayer(q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	layerResults := make([]layerResult, 0, level+1)
-	for layer := min(level, maxLayer); layer >= 0; layer-- {
+	for layer := min(level, h.maxLayer); layer >= 0; layer-- {
 		mMax := h.M
 		if layer == 0 {
 			mMax = h.M * 2
@@ -272,53 +262,42 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 			}
 			sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
 		}
-		layerResults = append(layerResults, layerResult{layer, mMax, h.selectNeighbors(candidates, mMax)})
-		ep = candidates
-	}
-	h.mu.RUnlock()
-
-	h.mu.Lock()
-	for _, lr := range layerResults {
-		node.connections[lr.layer] = make([]int32, len(lr.neighbors))
-		for i, nb := range lr.neighbors {
-			node.connections[lr.layer][i] = nb.slot
+		neighbors := h.selectNeighbors(candidates, mMax)
+		node.connections[layer] = make([]int32, len(neighbors))
+		for i, nb := range neighbors {
+			node.connections[layer][i] = nb.slot
 		}
-		for _, nb := range lr.neighbors {
+		for _, nb := range neighbors {
 			nbNode := h.slotToNode[nb.slot]
-			if lr.layer >= len(nbNode.connections) {
+			if layer >= len(nbNode.connections) {
 				continue
 			}
-			nbNode.connections[lr.layer] = append(nbNode.connections[lr.layer], poolIdx)
-			if len(nbNode.connections[lr.layer]) > lr.mMax {
-				conns := nbNode.connections[lr.layer]
-				pruned := make([]candidate, len(conns))
-				for i, s := range conns {
-					var d float32
-					if h.codebook != nil {
-						d = h.codebook.DistInt8(h.sqPool.Get(nbNode.poolIdx), h.sqPool.Get(s))
-					} else {
-						d = h.dist(h.pool.Get(nbNode.poolIdx), h.pool.Get(s))
-					}
-					pruned[i] = candidate{s, d}
-				}
-				for i := 1; i < len(pruned); i++ {
-					for j := i; j > 0 && pruned[j].dist < pruned[j-1].dist; j-- {
-						pruned[j], pruned[j-1] = pruned[j-1], pruned[j]
-					}
-				}
-				pruned = pruned[:lr.mMax]
-				nbNode.connections[lr.layer] = make([]int32, lr.mMax)
-				for i, p := range pruned {
-					nbNode.connections[lr.layer][i] = p.slot
+			conns := nbNode.connections[layer]
+			if len(conns) < mMax {
+				nbNode.connections[layer] = append(conns, poolIdx)
+				continue
+			}
+
+			nbVec := h.pool.Get(nb.slot)
+			newDist := h.dist(nbVec, h.pool.Get(poolIdx))
+			worstIdx, worstDist := -1, float32(-1)
+			for ci, connSlot := range conns {
+				d := h.dist(nbVec, h.pool.Get(connSlot))
+				if d > worstDist {
+					worstDist, worstIdx = d, ci
 				}
 			}
+			if worstIdx >= 0 && newDist < worstDist {
+				nbNode.connections[layer][worstIdx] = poolIdx
+			}
 		}
+		ep = candidates
 	}
+
 	if level > h.maxLayer {
 		h.maxLayer = level
 		h.entrySlot = poolIdx
 	}
-	h.mu.Unlock()
 }
 
 func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
