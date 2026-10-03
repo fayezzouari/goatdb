@@ -289,6 +289,11 @@ POST /collections/{name}/search
 
 `top_k` defaults to 10 if omitted or zero.
 
+| Field              | Default | Description                        |
+|--------------------|---------|------------------------------------|
+| `include_vectors`  | `false` | Return each result's `embeddings`  |
+| `include_metadata` | `true`  | Return each result's `metadata`    |
+
 Response `200`:
 ```json
 {
@@ -296,12 +301,13 @@ Response `200`:
     {
       "id": "doc-001",
       "distance": 0.012,
-      "embeddings": [0.1, 0.4, 0.9],
       "metadata": { "title": "Introduction to Go" }
     }
   ]
 }
 ```
+
+With `"include_vectors": true`, each result also carries `"embeddings": [0.1, 0.4, 0.9]`. Leaving vectors out (and metadata too, with `"include_metadata": false`) skips the storage reads and keeps responses small, which matters at large `top_k` and `dim`.
 
 Results are sorted by distance ascending (nearest first). The distance unit depends on the metric chosen at collection creation time.
 

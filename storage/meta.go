@@ -143,3 +143,40 @@ func (m *MetaStore) AllSlots() ([]string, []uint32, error) {
 func (m *MetaStore) Close() error {
 	return m.db.Close()
 }
+
+// SlotMeta is the result of a batched slot/metadata lookup for one id.
+type SlotMeta struct {
+	Slot     uint32
+	Found    bool
+	Metadata map[string]any
+}
+
+// GetSlotsAndMeta resolves the slot (and optionally the metadata) for every id
+// inside a single read transaction. The result is aligned with ids; entries
+// whose id is unknown have Found == false.
+func (m *MetaStore) GetSlotsAndMeta(ids []string, withMeta bool) ([]SlotMeta, error) {
+	out := make([]SlotMeta, len(ids))
+	err := m.db.View(func(tx *bolt.Tx) error {
+		slots := tx.Bucket(bucketSlots)
+		metas := tx.Bucket(bucketMeta)
+		for i, id := range ids {
+			key := []byte(id)
+			raw := slots.Get(key)
+			if raw == nil {
+				continue
+			}
+			out[i].Slot = binary.LittleEndian.Uint32(raw)
+			out[i].Found = true
+			if !withMeta {
+				continue
+			}
+			if mraw := metas.Get(key); mraw != nil {
+				if err := msgpack.Unmarshal(mraw, &out[i].Metadata); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
+}

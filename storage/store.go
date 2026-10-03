@@ -218,3 +218,36 @@ func (s *Store) Close() error {
 	s.vectors.Close()
 	return s.meta.Close()
 }
+
+// GetMany hydrates several vectors at once. Slots and metadata are resolved in
+// a single metadata read transaction, and embeddings are decoded from the
+// vector file only when withEmb is set. The result is aligned with ids; ids
+// that are missing or deleted come back with an empty Id.
+func (s *Store) GetMany(ids []string, withEmb, withMeta bool) ([]StoredVector, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := s.meta.GetSlotsAndMeta(ids, withMeta)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]StoredVector, len(ids))
+	for i, e := range entries {
+		if !e.Found {
+			continue
+		}
+		if withEmb {
+			emb, ok := s.vectors.Read(int(e.Slot))
+			if !ok {
+				continue
+			}
+			out[i].Embeddings = emb
+		} else if !s.vectors.Live(int(e.Slot)) {
+			continue
+		}
+		out[i].Id = ids[i]
+		out[i].Metadata = e.Metadata
+	}
+	return out, nil
+}
