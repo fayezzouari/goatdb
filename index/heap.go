@@ -1,6 +1,6 @@
 package index
 
-import "github.com/fayez/goatdb/core"
+import "github.com/fayezzouari/goatdb/core"
 
 type resultHeap []core.SearchResult
 

@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 const benchDim = 128

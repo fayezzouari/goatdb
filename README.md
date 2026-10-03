@@ -63,7 +63,7 @@ Windows is not supported: the storage layer uses `mmap`/`msync`.
 **go install**
 
 `go install` from the GitHub path does not work yet, because the module path
-(`github.com/fayez/goatdb`) does not match the repository location. Build from source
+(`github.com/fayezzouari/goatdb`) does not match the repository location. Build from source
 instead (see below).
 
 ---

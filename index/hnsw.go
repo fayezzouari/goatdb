@@ -9,7 +9,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 type candidate struct {

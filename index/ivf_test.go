@@ -3,7 +3,7 @@ package index
 import (
 	"testing"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 func TestIVFIndexUntrainedFallback(t *testing.T) {

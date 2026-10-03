@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 type lshTable struct {

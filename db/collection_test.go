@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/fayez/goatdb/core"
-	"github.com/fayez/goatdb/index"
+	"github.com/fayezzouari/goatdb/core"
+	"github.com/fayezzouari/goatdb/index"
 )
 
 var ctx = context.Background()

@@ -3,7 +3,7 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 type vectorReq struct {

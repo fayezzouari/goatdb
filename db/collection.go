@@ -8,8 +8,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/fayez/goatdb/core"
-	"github.com/fayez/goatdb/storage"
+	"github.com/fayezzouari/goatdb/core"
+	"github.com/fayezzouari/goatdb/storage"
 )
 
 type Collection struct {
