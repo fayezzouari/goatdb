@@ -132,7 +132,7 @@ POST /collections
 }
 ```
 
-`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`
+`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`. Results are ordered by ascending distance; for `dot_product` the distance is the negated dot product, so the largest dot product comes first.
 `index_type` options: `flat`, `lsh`, `ivf`, `hnsw` — defaults to `flat` if omitted
 
 Response `201`:
