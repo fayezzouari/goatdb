@@ -70,12 +70,19 @@ func (v *Vector) Distance(other *Vector, metric DistanceMetric) float32 {
 	case Euclidean:
 		return v.euclidean(other)
 	case DotProduct:
-		return v.dotProduct(other)
+		return -v.dotProduct(other)
 	case Manhattan:
 		return v.manhattan(other)
 	default:
 		panic("unsupported distance metric")
 	}
+}
+
+// Dot returns the raw dot product of a and b.
+func Dot(a, b []float32) float32 {
+	va := Vector{Embeddings: a}
+	vb := Vector{Embeddings: b}
+	return va.dotProduct(&vb)
 }
 
 func DistSlices(a, b []float32, metric DistanceMetric) float32 {
