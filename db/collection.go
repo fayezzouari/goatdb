@@ -25,7 +25,9 @@ type Collection struct {
 	dir       string
 	store     *storage.Store
 	index     core.Index
-	mu        sync.RWMutex
+	// opts holds the resolved index parameters. It is set once at creation.
+	opts CollectionOptions
+	mu   sync.RWMutex
 }
 
 type CollectionInfo struct {
@@ -33,6 +35,8 @@ type CollectionInfo struct {
 	Dim       int                 `json:"dim"`
 	Metric    core.DistanceMetric `json:"metric"`
 	IndexType string              `json:"index_type"`
+	HNSW      *HNSWParams         `json:"hnsw,omitempty"`
+	IVF       *IVFParams          `json:"ivf,omitempty"`
 }
 
 func newCollection(name string, dim int, metric core.DistanceMetric, indexType string, dir string, idx core.Index) (*Collection, error) {
@@ -70,7 +74,16 @@ func newCollection(name string, dim int, metric core.DistanceMetric, indexType s
 }
 
 func (c *Collection) Info() CollectionInfo {
-	return CollectionInfo{Name: c.name, Dim: c.dim, Metric: c.metric, IndexType: c.indexType}
+	info := CollectionInfo{Name: c.name, Dim: c.dim, Metric: c.metric, IndexType: c.indexType}
+	if c.opts.HNSW != nil {
+		p := *c.opts.HNSW
+		info.HNSW = &p
+	}
+	if c.opts.IVF != nil {
+		p := *c.opts.IVF
+		info.IVF = &p
+	}
+	return info
 }
 
 func (c *Collection) rebuildIndex() error {
@@ -183,10 +196,14 @@ func (c *Collection) DeleteVector(ctx context.Context, id string) error {
 	return nil
 }
 
-// SearchOptions controls how search results are hydrated from storage.
+// SearchOptions controls search depth and how results are hydrated from storage.
 type SearchOptions struct {
 	IncludeVectors  bool
 	IncludeMetadata bool
+	// Ef overrides the search depth for this query when > 0. HNSW searches
+	// with beam width max(Ef, topK); IVF probes Ef lists. Flat and LSH
+	// indexes ignore it. Values above MaxEf fail with ErrInvalidParams.
+	Ef int
 }
 
 // Search returns the topK nearest vectors with embeddings and metadata attached.
@@ -203,10 +220,20 @@ func (c *Collection) SearchWithOptions(ctx context.Context, query core.Vector, t
 	if len(query.Embeddings) != c.dim {
 		return nil, fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(query.Embeddings))
 	}
+	if opts.Ef != 0 {
+		if err := ValidateEf(opts.Ef); err != nil {
+			return nil, err
+		}
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	results := c.index.Search(query, topK)
+	var results []core.SearchResult
+	if es, ok := c.index.(core.EfSearcher); ok && opts.Ef > 0 {
+		results = es.SearchEf(query, topK, opts.Ef)
+	} else {
+		results = c.index.Search(query, topK)
+	}
 	if opts.IncludeVectors || opts.IncludeMetadata {
 		ids := make([]string, len(results))
 		for i, r := range results {

@@ -263,20 +263,20 @@ func (idx *IVFIndex) DeleteVector(id string) bool {
 
 // topNCentroids returns the indices of the nProbe nearest centroids using a
 // partial-sort heap — O(nClusters log nProbe) instead of O(nClusters²).
-func (idx *IVFIndex) topNCentroids(query []float32) []int {
+func (idx *IVFIndex) topNCentroids(query []float32, nProbe int) []int {
 	type cd struct {
 		i    int
 		dist float32
 	}
 	// Max-heap capped at nProbe entries.
 	type cdHeap []cd
-	h := make(cdHeap, 0, idx.nProbe)
+	h := make(cdHeap, 0, min(nProbe, idx.nClusters))
 	hLess := func(a, b cd) bool { return a.dist > b.dist } // max at top
 	_ = hLess
 
 	for c := 0; c < idx.nClusters; c++ {
 		d := l2sq(query, idx.centroid(c))
-		if len(h) < idx.nProbe {
+		if len(h) < nProbe {
 			h = append(h, cd{c, d})
 			// sift up
 			for i := len(h) - 1; i > 0; {
@@ -317,11 +317,25 @@ func (idx *IVFIndex) topNCentroids(query []float32) []int {
 }
 
 func (idx *IVFIndex) Search(query core.Vector, topK int) []core.SearchResult {
+	return idx.SearchEf(query, topK, 0)
+}
+
+// SearchEf probes the nProbe nearest lists, where nProbe is ef. An ef <= 0
+// uses the index's configured nProbe.
+func (idx *IVFIndex) SearchEf(query core.Vector, topK, ef int) []core.SearchResult {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	nProbe := ef
+	if nProbe <= 0 {
+		nProbe = idx.nProbe
+	}
 	q := idx.metric.Prepare(query.Embeddings)
-	clusterIdxs := idx.topNCentroids(q)
+	// Before training there are no centroids and every vector is in list 0.
+	clusterIdxs := []int{0}
+	if idx.trained {
+		clusterIdxs = idx.topNCentroids(q, nProbe)
+	}
 
 	distFn := idx.metric.Dist
 	rh := &resultHeap{}

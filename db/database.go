@@ -17,6 +17,12 @@ type collectionConfig struct {
 	Dim       int                 `json:"dim"`
 	Metric    core.DistanceMetric `json:"metric"`
 	IndexType string              `json:"index_type"`
+	HNSW      *HNSWParams         `json:"hnsw,omitempty"`
+	IVF       *IVFParams          `json:"ivf,omitempty"`
+}
+
+func (cfg collectionConfig) options() CollectionOptions {
+	return CollectionOptions{HNSW: cfg.HNSW, IVF: cfg.IVF}
 }
 
 type Database struct {
@@ -49,7 +55,14 @@ func Open(dir string) (*Database, error) {
 			log.Printf("warn: skipping collection dir %q: %v", entry.Name(), err)
 			continue
 		}
-		idx, err := createIndex(cfg.IndexType, cfg.Dim, cfg.Metric)
+		// Configs written before index parameters were stored have none, so
+		// they resolve to the defaults those collections were built with.
+		opts, err := resolveOptions(cfg.IndexType, cfg.options())
+		if err != nil {
+			log.Printf("warn: skipping collection dir %q: %v", entry.Name(), err)
+			continue
+		}
+		idx, err := createIndex(cfg.IndexType, cfg.Dim, cfg.Metric, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -57,13 +70,31 @@ func Open(dir string) (*Database, error) {
 		if err != nil {
 			return nil, err
 		}
+		col.opts = opts
 		db.collections[cfg.Name] = col
 	}
 
 	return db, nil
 }
 
+// CreateCollection creates a collection with the default index parameters.
 func (db *Database) CreateCollection(name string, dim int, metric core.DistanceMetric, indexType string) (*Collection, error) {
+	return db.CreateCollectionWithOptions(name, dim, metric, indexType, CollectionOptions{})
+}
+
+// CreateCollectionWithOptions creates a collection with the given index
+// parameters. Unset fields take their defaults and parameters for other index
+// types are ignored. Out-of-range values fail with ErrInvalidParams.
+func (db *Database) CreateCollectionWithOptions(name string, dim int, metric core.DistanceMetric, indexType string, opts CollectionOptions) (*Collection, error) {
+	opts, err := resolveOptions(indexType, opts)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := createIndex(indexType, dim, metric, opts)
+	if err != nil {
+		return nil, err
+	}
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -76,13 +107,8 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 		return nil, err
 	}
 
-	cfg := collectionConfig{Name: name, Dim: dim, Metric: metric, IndexType: indexType}
+	cfg := collectionConfig{Name: name, Dim: dim, Metric: metric, IndexType: indexType, HNSW: opts.HNSW, IVF: opts.IVF}
 	if err := saveConfig(colDir, cfg); err != nil {
-		return nil, err
-	}
-
-	idx, err := createIndex(indexType, dim, metric)
-	if err != nil {
 		return nil, err
 	}
 
@@ -90,6 +116,7 @@ func (db *Database) CreateCollection(name string, dim int, metric core.DistanceM
 	if err != nil {
 		return nil, err
 	}
+	col.opts = opts
 
 	db.collections[name] = col
 	return col, nil
@@ -142,16 +169,18 @@ func (db *Database) Close() error {
 	return nil
 }
 
-func createIndex(indexType string, dim int, metric core.DistanceMetric) (core.Index, error) {
+// createIndex builds an index; opts must come from resolveOptions.
+func createIndex(indexType string, dim int, metric core.DistanceMetric, opts CollectionOptions) (core.Index, error) {
 	switch indexType {
 	case "flat":
 		return index.NewFlatIndex(dim, metric), nil
 	case "lsh":
-		return index.NewLSHIndex(dim, 20, 8, metric), nil
+		return index.NewLSHIndex(dim, defaultLSHTables, defaultLSHBits, metric), nil
 	case "ivf":
-		return index.NewIVFIndex(dim, 100, 20, metric), nil
+		return index.NewIVFIndex(dim, opts.IVF.NList, opts.IVF.NProbe, metric), nil
 	case "hnsw":
-		return index.NewHNSWIndex(dim, 16, 200, 128, metric), nil
+		p := opts.HNSW
+		return index.NewHNSWIndex(dim, p.M, p.EfConstruction, p.EfSearch, metric), nil
 	default:
 		return nil, fmt.Errorf("unknown index type: %q", indexType)
 	}

@@ -578,6 +578,12 @@ func (h *HNSWIndex) DeleteVector(id string) bool {
 }
 
 func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
+	return h.SearchEf(query, topK, 0)
+}
+
+// SearchEf searches with beam width max(ef, topK) at layer 0. An ef <= 0 uses
+// the index's configured ef.
+func (h *HNSWIndex) SearchEf(query core.Vector, topK, ef int) []core.SearchResult {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.maxLayer == -1 {
@@ -601,7 +607,10 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(s, q, qInt8, ep, max(h.ef, topK), 0)
+	if ef <= 0 {
+		ef = h.ef
+	}
+	candidates := h.searchLayer(s, q, qInt8, ep, max(ef, topK), 0)
 
 	if qInt8 != nil {
 		for i := range candidates {

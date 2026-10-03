@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/fayezzouari/goatdb/core"
+	"github.com/fayezzouari/goatdb/db"
 )
 
 type createCollectionReq struct {
@@ -11,6 +13,8 @@ type createCollectionReq struct {
 	Dim       int                 `json:"dim"`
 	Metric    core.DistanceMetric `json:"metric"`
 	IndexType string              `json:"index_type"`
+	HNSW      *db.HNSWParams      `json:"hnsw"`
+	IVF       *db.IVFParams       `json:"ivf"`
 }
 
 func (h *Handler) CreateCollection(w http.ResponseWriter, r *http.Request) {
@@ -42,8 +46,13 @@ func (h *Handler) CreateCollection(w http.ResponseWriter, r *http.Request) {
 		req.Metric = core.Euclidean
 	}
 
-	if _, err := h.DB.CreateCollection(req.Name, req.Dim, req.Metric, req.IndexType); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+	opts := db.CollectionOptions{HNSW: req.HNSW, IVF: req.IVF}
+	if _, err := h.DB.CreateCollectionWithOptions(req.Name, req.Dim, req.Metric, req.IndexType, opts); err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, db.ErrInvalidParams) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"name": req.Name})
