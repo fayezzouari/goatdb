@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/fayez/goatdb/core"
+	"github.com/fayez/goatdb/db"
 )
 
 type vectorReq struct {
@@ -28,7 +31,7 @@ func (h *Handler) AddVector(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := col.AddVector(r.Context(), req.Id, core.Vector{Embeddings: req.Embeddings, Metadata: req.Metadata}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, insertErrorStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": req.Id})
@@ -52,20 +55,33 @@ func (h *Handler) AddVectors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	batch := make(map[string]core.Vector, len(req.Vectors))
+	batch := make([]db.VectorEntry, 0, len(req.Vectors))
+	seen := make(map[string]struct{}, len(req.Vectors))
 	for _, v := range req.Vectors {
 		if v.Id == "" || len(v.Embeddings) == 0 {
 			writeError(w, http.StatusBadRequest, "each vector requires id and embeddings")
 			return
 		}
-		batch[v.Id] = core.Vector{Embeddings: v.Embeddings, Metadata: v.Metadata}
+		if _, dup := seen[v.Id]; dup {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("duplicate id %q in batch", v.Id))
+			return
+		}
+		seen[v.Id] = struct{}{}
+		batch = append(batch, db.VectorEntry{Id: v.Id, Vector: core.Vector{Embeddings: v.Embeddings, Metadata: v.Metadata}})
 	}
 
 	if err := col.AddVectors(r.Context(), batch); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, insertErrorStatus(err), err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]int{"inserted": len(batch)})
+}
+
+func insertErrorStatus(err error) int {
+	if errors.Is(err, db.ErrExists) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
 }
 
 func (h *Handler) GetVector(w http.ResponseWriter, r *http.Request) {

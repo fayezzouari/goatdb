@@ -50,10 +50,14 @@ func BenchmarkCollectionAddVector(b *testing.B) {
 		indexType := indexType
 		col := newBenchCollection(b, indexType)
 		v := core.Vector{Embeddings: randomEmbeddings(benchDim)}
+		next := 0
 		b.Run(indexType, func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				col.AddVector(context.Background(), benchID(i), v)
+				if err := col.AddVector(context.Background(), benchID(next), v); err != nil {
+					b.Fatal(err)
+				}
+				next++
 			}
 		})
 	}
@@ -67,12 +71,14 @@ func BenchmarkCollectionAddVectors(b *testing.B) {
 		indexType := indexType
 		col := newBenchCollection(b, indexType)
 		emb := randomEmbeddings(benchDim)
+		next := 0
 		b.Run(fmt.Sprintf("%s/batch%d", indexType, batchSize), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				batch := make(map[string]core.Vector, batchSize)
-				for j := 0; j < batchSize; j++ {
-					batch[benchID(i*batchSize+j)] = core.Vector{Embeddings: emb}
+				batch := make([]VectorEntry, batchSize)
+				for j := range batch {
+					batch[j] = VectorEntry{Id: benchID(next), Vector: core.Vector{Embeddings: emb}}
+					next++
 				}
 				if err := col.AddVectors(context.Background(), batch); err != nil {
 					b.Fatal(err)
