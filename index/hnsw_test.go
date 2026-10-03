@@ -389,3 +389,22 @@ func TestHNSWConcurrentAddSearch(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestHNSWIndexDotProductOrder(t *testing.T) {
+	idx := NewHNSWIndex(2, 4, 20, 10, core.DotProduct)
+	idx.AddVector("low", core.Vector{Embeddings: []float32{1, 0}})
+	idx.AddVector("high", core.Vector{Embeddings: []float32{5, 0}})
+	idx.AddVector("mid", core.Vector{Embeddings: []float32{3, 0}})
+	idx.AddVector("neg", core.Vector{Embeddings: []float32{-2, 0}})
+
+	results := idx.Search(core.Vector{Embeddings: []float32{1, 0}}, 3)
+	want := []string{"high", "mid", "low"}
+	if len(results) != len(want) {
+		t.Fatalf("expected %d results, got %d", len(want), len(results))
+	}
+	for i, id := range want {
+		if results[i].Id != id {
+			t.Errorf("result %d: expected %q, got %q", i, id, results[i].Id)
+		}
+	}
+}

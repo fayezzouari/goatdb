@@ -119,3 +119,57 @@ func TestStoreWALReplay(t *testing.T) {
 		t.Errorf("expected {3,4} after reload, got %v", emb)
 	}
 }
+
+func TestStoreGetMany(t *testing.T) {
+	s, err := Open(t.TempDir(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.Add("a", []float32{1, 2}, map[string]any{"label": "a"})
+	s.Add("b", []float32{3, 4}, nil)
+	s.Add("c", []float32{5, 6}, map[string]any{"label": "c"})
+	s.Delete("c")
+
+	ids := []string{"a", "missing", "b", "c"}
+
+	got, err := s.GetMany(ids, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("expected %d results, got %d", len(ids), len(got))
+	}
+	if got[0].Id != "a" || got[0].Embeddings[1] != 2 || got[0].Metadata["label"] != "a" {
+		t.Errorf("unexpected result for a: %+v", got[0])
+	}
+	if got[1].Id != "" {
+		t.Errorf("missing id should be empty, got %+v", got[1])
+	}
+	if got[2].Id != "b" || got[2].Embeddings[0] != 3 || got[2].Metadata != nil {
+		t.Errorf("unexpected result for b: %+v", got[2])
+	}
+	if got[3].Id != "" {
+		t.Errorf("deleted id should be empty, got %+v", got[3])
+	}
+
+	got, err = s.GetMany(ids, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Id != "a" || got[0].Embeddings != nil || got[0].Metadata["label"] != "a" {
+		t.Errorf("expected metadata only for a, got %+v", got[0])
+	}
+	if got[3].Id != "" {
+		t.Errorf("deleted id should be empty without embeddings too, got %+v", got[3])
+	}
+
+	got, err = s.GetMany(ids, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Id != "a" || got[0].Embeddings != nil || got[0].Metadata != nil {
+		t.Errorf("expected id only for a, got %+v", got[0])
+	}
+}
