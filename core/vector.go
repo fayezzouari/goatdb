@@ -8,71 +8,38 @@ type Vector struct {
 }
 
 func (v *Vector) cosine(other *Vector) float32 {
-	var normV1, normV2, dot float32
-	if hasAVX2 && len(v.Embeddings) > 0 {
-		normV1 = dotProductAVX2(&v.Embeddings[0], &v.Embeddings[0], len(v.Embeddings))
-		normV2 = dotProductAVX2(&other.Embeddings[0], &other.Embeddings[0], len(other.Embeddings))
-		dot = dotProductAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings))
-	} else {
-		n := len(v.Embeddings)
-		for i := 0; i < n; i++ {
-			normV1 += v.Embeddings[i] * v.Embeddings[i]
-			normV2 += other.Embeddings[i] * other.Embeddings[i]
-		}
-		dot = v.dotProductScalar(other)
-	}
-	if normV1 == 0 || normV2 == 0 {
-		return 0
-	}
-	return 1 - (dot / (float32(math.Sqrt(float64(normV1))) * float32(math.Sqrt(float64(normV2)))))
+	return cosineSlices(v.Embeddings, other.Embeddings)
 }
 
 func (v *Vector) euclidean(other *Vector) float32 {
-	if hasAVX2 && len(v.Embeddings) > 0 {
-		return float32(math.Sqrt(float64(l2SquaredAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings)))))
-	}
-	distance := float32(0)
-	n := len(v.Embeddings)
-	for i := 0; i < n; i++ {
-		diff := v.Embeddings[i] - other.Embeddings[i]
-		distance += diff * diff
-	}
-	return float32(math.Sqrt(float64(distance)))
+	return float32(math.Sqrt(float64(L2SqSlices(v.Embeddings, other.Embeddings))))
 }
 
 func (v *Vector) dotProduct(other *Vector) float32 {
-	if hasAVX2 && len(v.Embeddings) > 0 {
-		return dotProductAVX2(&v.Embeddings[0], &other.Embeddings[0], len(v.Embeddings))
-	}
-	return v.dotProductScalar(other)
+	return Dot(v.Embeddings, other.Embeddings)
 }
 
-func (v *Vector) dotProductScalar(other *Vector) float32 {
-	n := len(v.Embeddings)
-	var s0, s1, s2, s3 float32
-	i := 0
-	for ; i <= n-8; i += 8 {
-		s0 += v.Embeddings[i+0]*other.Embeddings[i+0] + v.Embeddings[i+1]*other.Embeddings[i+1]
-		s1 += v.Embeddings[i+2]*other.Embeddings[i+2] + v.Embeddings[i+3]*other.Embeddings[i+3]
-		s2 += v.Embeddings[i+4]*other.Embeddings[i+4] + v.Embeddings[i+5]*other.Embeddings[i+5]
-		s3 += v.Embeddings[i+6]*other.Embeddings[i+6] + v.Embeddings[i+7]*other.Embeddings[i+7]
-	}
-	for ; i < n; i++ {
-		s0 += v.Embeddings[i] * other.Embeddings[i]
-	}
-	return s0 + s1 + s2 + s3
+func (v *Vector) manhattan(other *Vector) float32 {
+	return manhattanSlices(v.Embeddings, other.Embeddings)
 }
 
 func (v *Vector) Distance(other *Vector, metric DistanceMetric) float32 {
+	return DistSlices(v.Embeddings, other.Embeddings, metric)
+}
+
+// DistSlices returns the distance between a and b for metric. Indexes should
+// use ResolveMetric instead, which avoids per-call dispatch and lets them skip
+// cosine norms and the euclidean sqrt.
+func DistSlices(a, b []float32, metric DistanceMetric) float32 {
 	switch metric {
 	case Cosine:
-		return v.cosine(other)
+		return cosineSlices(a, b)
 	case Euclidean:
-		return v.euclidean(other)
+		return float32(math.Sqrt(float64(L2SqSlices(a, b))))
 	case DotProduct:
-		return -v.dotProduct(other)
+		return -Dot(a, b)
 	case Manhattan:
-		return v.manhattan(other)
+		return manhattanSlices(a, b)
 	default:
 		panic("unsupported distance metric")
 	}
@@ -80,15 +47,10 @@ func (v *Vector) Distance(other *Vector, metric DistanceMetric) float32 {
 
 // Dot returns the raw dot product of a and b.
 func Dot(a, b []float32) float32 {
-	va := Vector{Embeddings: a}
-	vb := Vector{Embeddings: b}
-	return va.dotProduct(&vb)
-}
-
-func DistSlices(a, b []float32, metric DistanceMetric) float32 {
-	va := Vector{Embeddings: a}
-	vb := Vector{Embeddings: b}
-	return va.Distance(&vb, metric)
+	if hasAVX2 && len(a) > 0 {
+		return dotProductAVX2(&a[0], &b[0], len(a))
+	}
+	return dotScalar(a, b)
 }
 
 // L2SqSlices returns the squared euclidean distance between a and b without
@@ -97,19 +59,48 @@ func L2SqSlices(a, b []float32) float32 {
 	if hasAVX2 && len(a) > 0 {
 		return l2SquaredAVX2(&a[0], &b[0], len(a))
 	}
+	return l2SqScalar(a, b)
+}
+
+func cosineSlices(a, b []float32) float32 {
+	normA := Dot(a, a)
+	normB := Dot(b, b)
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	dot := Dot(a, b)
+	return 1 - (dot / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB)))))
+}
+
+func manhattanSlices(a, b []float32) float32 {
+	var distance float32
+	for i := range a {
+		distance += float32(math.Abs(float64(a[i] - b[i])))
+	}
+	return distance
+}
+
+func dotScalar(a, b []float32) float32 {
+	n := len(a)
+	var s0, s1, s2, s3 float32
+	i := 0
+	for ; i <= n-8; i += 8 {
+		s0 += a[i+0]*b[i+0] + a[i+1]*b[i+1]
+		s1 += a[i+2]*b[i+2] + a[i+3]*b[i+3]
+		s2 += a[i+4]*b[i+4] + a[i+5]*b[i+5]
+		s3 += a[i+6]*b[i+6] + a[i+7]*b[i+7]
+	}
+	for ; i < n; i++ {
+		s0 += a[i] * b[i]
+	}
+	return s0 + s1 + s2 + s3
+}
+
+func l2SqScalar(a, b []float32) float32 {
 	var s float32
 	for i := range a {
 		d := a[i] - b[i]
 		s += d * d
 	}
 	return s
-}
-
-func (v *Vector) manhattan(other *Vector) float32 {
-	distance := float32(0)
-	n := len(v.Embeddings)
-	for i := 0; i < n; i++ {
-		distance += float32(math.Abs(float64(v.Embeddings[i] - other.Embeddings[i])))
-	}
-	return distance
 }
