@@ -177,6 +177,27 @@ POST /collections
 `metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`. Results are ordered by ascending distance; for `dot_product` the distance is the negated dot product, so the largest dot product comes first.
 `index_type` options: `flat`, `lsh`, `ivf`, `hnsw` — defaults to `flat` if omitted
 
+Index parameters are optional. Omitted fields take the defaults below, and parameters for a different index type are ignored. Out-of-range values return `400`.
+
+```json
+{
+  "name": "articles",
+  "dim": 1536,
+  "index_type": "hnsw",
+  "hnsw": { "m": 32, "ef_construction": 400, "ef_search": 64 }
+}
+```
+
+| Field                  | Default | Range        | Description                                           |
+|------------------------|---------|--------------|-------------------------------------------------------|
+| `hnsw.m`               | `16`    | 2–512        | Graph degree per node                                 |
+| `hnsw.ef_construction` | `200`   | 1–10000      | Beam width while inserting                            |
+| `hnsw.ef_search`       | `128`   | 1–10000      | Default beam width at search time                     |
+| `ivf.nlist`            | `100`   | 1–65536      | Number of k-means clusters                            |
+| `ivf.nprobe`           | `20`    | 1–`nlist`    | Default number of clusters scanned per search         |
+
+The parameters are stored with the collection and returned by `GET /collections/{name}`.
+
 Response `201`:
 ```json
 { "name": "articles" }
@@ -209,9 +230,12 @@ Response `200`:
   "name": "articles",
   "dim": 1536,
   "metric": "cosine",
-  "index_type": "hnsw"
+  "index_type": "hnsw",
+  "hnsw": { "m": 16, "ef_construction": 200, "ef_search": 128 }
 }
 ```
+
+`hnsw` is present for HNSW collections and `ivf` (`{"nlist": 100, "nprobe": 20}`) for IVF collections.
 
 ---
 
@@ -337,6 +361,9 @@ POST /collections/{name}/search
 |--------------------|---------|------------------------------------|
 | `include_vectors`  | `false` | Return each result's `embeddings`  |
 | `include_metadata` | `true`  | Return each result's `metadata`    |
+| `ef`               | —       | Search depth for this query, 1–10000 |
+
+`ef` trades speed for recall on a single query without changing the collection. For `hnsw` it is the beam width (the effective value is `max(ef, top_k)`) and overrides `ef_search`; for `ivf` it is the number of clusters scanned and overrides `nprobe`. `flat` and `lsh` ignore it. Values outside 1–10000 return `400`.
 
 Response `200`:
 ```json

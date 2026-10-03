@@ -13,6 +13,8 @@ type searchReq struct {
 	// IncludeVectors defaults to false; IncludeMetadata defaults to true.
 	IncludeVectors  bool  `json:"include_vectors"`
 	IncludeMetadata *bool `json:"include_metadata"`
+	// Ef overrides the search depth (HNSW ef, IVF nprobe) for this query.
+	Ef *int `json:"ef"`
 }
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +36,13 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	opts := db.SearchOptions{IncludeVectors: req.IncludeVectors, IncludeMetadata: true}
 	if req.IncludeMetadata != nil {
 		opts.IncludeMetadata = *req.IncludeMetadata
+	}
+	if req.Ef != nil {
+		if err := db.ValidateEf(*req.Ef); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		opts.Ef = *req.Ef
 	}
 
 	results, err := col.SearchWithOptions(r.Context(), core.Vector{Embeddings: req.Embeddings}, req.TopK, opts)
