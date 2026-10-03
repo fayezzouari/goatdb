@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: goatdb
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: goatdb
+    main: ./cmd/goatdb
+    binary: goatdb
+    env:
+      - CGO_ENABLED=0
+    # Storage relies on mmap/msync (syscall.Mmap, unix.Msync), so only
+    # unix targets are supported.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: goatdb
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  github:
+    owner: fayezzouari
+    name: goatdb
+  prerelease: auto
