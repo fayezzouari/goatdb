@@ -4,9 +4,9 @@
 
 #include "textflag.h"
 
-// func dotProductAVX2(a, b *float32, n int) float32
+// func dotSIMD(a, b *float32, n int) float32
 // Computes sum(a[i]*b[i]) using AVX2 FMA, unrolled 2x (16 floats/iter).
-TEXT ·dotProductAVX2(SB), NOSPLIT, $0-28
+TEXT ·dotSIMD(SB), NOSPLIT, $0-28
     MOVQ a+0(FP), SI
     MOVQ b+8(FP), DI
     MOVQ n+16(FP), CX
@@ -60,9 +60,9 @@ done_dot:
     MOVSS X0, ret+24(FP)
     RET
 
-// func l2SquaredAVX2(a, b *float32, n int) float32
+// func l2SqSIMD(a, b *float32, n int) float32
 // Computes sum((a[i]-b[i])^2) using AVX2, unrolled 2x.
-TEXT ·l2SquaredAVX2(SB), NOSPLIT, $0-28
+TEXT ·l2SqSIMD(SB), NOSPLIT, $0-28
     MOVQ a+0(FP), SI
     MOVQ b+8(FP), DI
     MOVQ n+16(FP), CX
