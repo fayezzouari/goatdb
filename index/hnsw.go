@@ -402,7 +402,7 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 
 			nbVec := h.pool.Get(nb.slot)
 			newDist := h.dist(nbVec, h.pool.Get(poolIdx))
-			worstIdx, worstDist := -1, float32(-1)
+			worstIdx, worstDist := -1, float32(-math.MaxFloat32)
 			for ci, connSlot := range conns {
 				d := h.dist(nbVec, h.pool.Get(connSlot))
 				if d > worstDist {

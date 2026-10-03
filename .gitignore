@@ -1,1 +1,23 @@
+# Environment
 .env
+
+# Build output
+/goatdb
+/bench
+/dist/
+*.exe
+*.test
+*.out
+
+# Generated benchmark report (go run ./cmd/bench)
+/bench.html
+
+# Runtime data
+/data/
+
+# Coverage
+coverage.*
+*.coverprofile
+
+# OS / editor
+.DS_Store

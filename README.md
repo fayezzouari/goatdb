@@ -30,6 +30,44 @@ On startup: WAL is replayed into mmap and BoltDB, then truncated.
 
 ---
 
+## Install
+
+**Docker (linux/amd64, linux/arm64)**
+
+Images are published to GitHub Container Registry and Docker Hub on every release.
+
+```bash
+# GitHub Container Registry
+docker run -d --name goatdb -p 8080:8080 -v goatdb_data:/data ghcr.io/fayezzouari/goatdb:latest
+
+# Docker Hub
+docker run -d --name goatdb -p 8080:8080 -v goatdb_data:/data fayezzouari/goatdb:latest
+```
+
+Pin a version with a tag such as `:0.1.0` or `:0.1`. The image has a built-in healthcheck on `/health`.
+
+**Prebuilt binaries**
+
+Download an archive for Linux or macOS (amd64 or arm64) from the
+[Releases page](https://github.com/fayezzouari/goatdb/releases), verify it against
+`checksums.txt`, then run it:
+
+```bash
+tar -xzf goatdb_<version>_linux_amd64.tar.gz
+./goatdb -version
+./goatdb -addr :8080 -dir ./data
+```
+
+Windows is not supported: the storage layer uses `mmap`/`msync`.
+
+**go install**
+
+`go install` from the GitHub path does not work yet, because the module path
+(`github.com/fayez/goatdb`) does not match the repository location. Build from source
+instead (see below).
+
+---
+
 ## Getting started
 
 **Prerequisites**
@@ -40,7 +78,7 @@ On startup: WAL is replayed into mmap and BoltDB, then truncated.
 **Build and run**
 
 ```bash
-git clone https://github.com/fayez/goatdb
+git clone https://github.com/fayezzouari/goatdb
 cd goatdb
 go build -o goatdb ./cmd/goatdb
 ./goatdb -addr :8080 -dir ./data
@@ -64,10 +102,14 @@ GOATDB_PORT=9090 docker compose up -d
 
 ## Configuration
 
-| Flag   | Default  | Description                        |
-|--------|----------|------------------------------------|
-| -addr  | :8080    | TCP address the server listens on  |
-| -dir   | ./data   | Directory where data is persisted  |
+| Flag     | Environment   | Default  | Description                        |
+|----------|---------------|----------|------------------------------------|
+| -addr    | `GOATDB_ADDR` | :8080    | TCP address the server listens on  |
+| -dir     | `GOATDB_DIR`  | ./data   | Directory where data is persisted  |
+| -version |               |          | Print the version and exit         |
+
+Flags take precedence over environment variables. In the Docker image the defaults
+are `GOATDB_ADDR=:8080` and `GOATDB_DIR=/data`.
 
 ---
 
@@ -132,7 +174,7 @@ POST /collections
 }
 ```
 
-`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`
+`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`. Results are ordered by ascending distance; for `dot_product` the distance is the negated dot product, so the largest dot product comes first.
 `index_type` options: `flat`, `lsh`, `ivf`, `hnsw` — defaults to `flat` if omitted
 
 Response `201`:
@@ -289,6 +331,11 @@ POST /collections/{name}/search
 
 `top_k` defaults to 10 if omitted or zero.
 
+| Field              | Default | Description                        |
+|--------------------|---------|------------------------------------|
+| `include_vectors`  | `false` | Return each result's `embeddings`  |
+| `include_metadata` | `true`  | Return each result's `metadata`    |
+
 Response `200`:
 ```json
 {
@@ -296,12 +343,13 @@ Response `200`:
     {
       "id": "doc-001",
       "distance": 0.012,
-      "embeddings": [0.1, 0.4, 0.9],
       "metadata": { "title": "Introduction to Go" }
     }
   ]
 }
 ```
+
+With `"include_vectors": true`, each result also carries `"embeddings": [0.1, 0.4, 0.9]`. Leaving vectors out (and metadata too, with `"include_metadata": false`) skips the storage reads and keeps responses small, which matters at large `top_k` and `dim`.
 
 Results are sorted by distance ascending (nearest first). The distance unit depends on the metric chosen at collection creation time.
 
@@ -365,6 +413,39 @@ go test ./...
 ```bash
 go test -bench=. -benchmem ./...
 ```
+
+CI runs `go vet`, `go test -race` and `go build` on Linux amd64 and arm64 for every
+push and pull request to `master`, and builds the Docker image for both architectures.
+
+---
+
+## Releasing
+
+Releases are driven by git tags. Push a semver tag to publish:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The `Release` workflow then:
+
+- builds Linux and macOS binaries (amd64, arm64) with GoReleaser and attaches them,
+  with `checksums.txt`, to a GitHub release;
+- builds a multi-arch image (linux/amd64, linux/arm64) and pushes it to
+  `ghcr.io/fayezzouari/goatdb` and `docker.io/<DOCKERHUB_USERNAME>/goatdb`, tagged
+  `X.Y.Z`, `X.Y`, `X` (from 1.0 on) and `latest`. Pre-release tags such as
+  `v0.2.0-rc.1` do not move `latest`.
+
+Required repository secrets (Settings > Secrets and variables > Actions):
+
+| Secret               | Purpose                                                  |
+|----------------------|----------------------------------------------------------|
+| `DOCKERHUB_USERNAME` | Docker Hub account or organisation the image is pushed to |
+| `DOCKERHUB_TOKEN`    | Docker Hub access token with read/write scope            |
+
+GHCR uses the built-in `GITHUB_TOKEN`. If the Docker Hub secrets are not set, the
+Docker Hub push is skipped and the image goes to GHCR only.
 
 ---
 

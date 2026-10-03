@@ -31,6 +31,17 @@ func TestDotProductUnrolled(t *testing.T) {
 	}
 }
 
+func TestDotProductDistanceNegated(t *testing.T) {
+	a := &Vector{Embeddings: []float32{1, 2, 3}}
+	b := &Vector{Embeddings: []float32{4, 5, 6}}
+	if got := a.Distance(b, DotProduct); got != -32 {
+		t.Errorf("Distance(DotProduct) = %v, want -32", got)
+	}
+	if got := Dot(a.Embeddings, b.Embeddings); got != 32 {
+		t.Errorf("Dot = %v, want 32", got)
+	}
+}
+
 func TestCosineIdentical(t *testing.T) {
 	a := &Vector{Embeddings: []float32{1, 0, 0}}
 	got := a.cosine(a)
