@@ -70,9 +70,9 @@ func BenchmarkCollectionAddVectors(b *testing.B) {
 		b.Run(fmt.Sprintf("%s/batch%d", indexType, batchSize), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				batch := make(map[string]core.Vector, batchSize)
-				for j := 0; j < batchSize; j++ {
-					batch[benchID(i*batchSize+j)] = core.Vector{Embeddings: emb}
+				batch := make([]VectorEntry, batchSize)
+				for j := range batch {
+					batch[j] = VectorEntry{Id: benchID(i*batchSize + j), Vector: core.Vector{Embeddings: emb}}
 				}
 				if err := col.AddVectors(context.Background(), batch); err != nil {
 					b.Fatal(err)
