@@ -50,7 +50,7 @@ func NewIVFIndex(dim, nClusters, nProbe int, metric core.DistanceMetric) *IVFInd
 	}
 }
 
-// l2sq returns the squared euclidean distance, dispatching to AVX2 when available.
+// l2sq returns the squared euclidean distance, using SIMD when available.
 // Used for k-means centroid assignment (metric-agnostic, no sqrt needed).
 func l2sq(a, b []float32) float32 { return core.L2SqSlices(a, b) }
 
