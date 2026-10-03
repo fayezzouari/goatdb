@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/fayez/goatdb/core"
-	"github.com/fayez/goatdb/db"
+	"github.com/fayezzouari/goatdb/core"
+	"github.com/fayezzouari/goatdb/db"
 )
 
 type vectorReq struct {
