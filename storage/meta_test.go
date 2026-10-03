@@ -1,8 +1,12 @@
 package storage
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestMetaStoreAllocSlot(t *testing.T) {
@@ -135,6 +139,83 @@ func TestMetaStoreAllSlots(t *testing.T) {
 	for _, id := range ids {
 		if id == "b" {
 			t.Error("deleted id 'b' should not appear in AllSlots")
+		}
+	}
+}
+
+func TestMetaStoreFreeSlotsManyDeletes(t *testing.T) {
+	path := t.TempDir() + "/meta.db"
+	ms, err := openMetaStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+
+	const n = 500
+	for i := 0; i < n; i++ {
+		if _, err := ms.AllocSlot(fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < n; i += 2 {
+		if err := ms.Delete(fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[uint32]bool{}
+	for i := 0; i < n/2; i++ {
+		slot, err := ms.AllocSlot(fmt.Sprintf("r%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slot%2 != 0 || seen[slot] {
+			t.Fatalf("alloc %d: got slot %d, want an unused even slot", i, slot)
+		}
+		seen[slot] = true
+	}
+	if slot, _ := ms.AllocSlot("fresh"); slot != n {
+		t.Errorf("expected fresh slot %d once free list is empty, got %d", n, slot)
+	}
+}
+
+func TestMetaStoreMigratesLegacyFreeSlots(t *testing.T) {
+	path := t.TempDir() + "/meta.db"
+	ms, err := openMetaStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := make([]byte, 8)
+	binary.LittleEndian.PutUint32(legacy[0:], 7)
+	binary.LittleEndian.PutUint32(legacy[4:], 3)
+	err = ms.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketConfig).Put(keyFreeSlots, legacy)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms.Close()
+
+	ms, err = openMetaStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ms.Close()
+	err = ms.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketConfig).Get(keyFreeSlots) != nil {
+			t.Error("legacy free list was not removed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []uint32{3, 7} {
+		got, err := ms.AllocSlot(fmt.Sprintf("m%d", want))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("expected migrated slot %d, got %d", want, got)
 		}
 	}
 }
