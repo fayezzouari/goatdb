@@ -59,6 +59,30 @@ func BenchmarkCollectionAddVector(b *testing.B) {
 	}
 }
 
+// ── AddVectors ────────────────────────────────────────────────────────────────
+
+func BenchmarkCollectionAddVectors(b *testing.B) {
+	const batchSize = 1000
+	for _, indexType := range []string{"flat", "hnsw"} {
+		indexType := indexType
+		col := newBenchCollection(b, indexType)
+		emb := randomEmbeddings(benchDim)
+		b.Run(fmt.Sprintf("%s/batch%d", indexType, batchSize), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				batch := make(map[string]core.Vector, batchSize)
+				for j := 0; j < batchSize; j++ {
+					batch[benchID(i*batchSize+j)] = core.Vector{Embeddings: emb}
+				}
+				if err := col.AddVectors(context.Background(), batch); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.N*batchSize)/b.Elapsed().Seconds(), "vectors/s")
+		})
+	}
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 func BenchmarkCollectionSearch(b *testing.B) {

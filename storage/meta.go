@@ -41,35 +41,69 @@ func openMetaStore(path string) (*MetaStore, error) {
 func (m *MetaStore) AllocSlot(id string) (uint32, error) {
 	var slot uint32
 	err := m.db.Update(func(tx *bolt.Tx) error {
-		cfg := tx.Bucket(bucketConfig)
-
-		if raw := cfg.Get(keyFreeSlots); len(raw) >= 4 {
-			slot = binary.LittleEndian.Uint32(raw[:4])
-			cfg.Put(keyFreeSlots, raw[4:])
-		} else {
-			var next uint64
-			if raw := cfg.Get(keyNextSlot); raw != nil {
-				next = binary.LittleEndian.Uint64(raw)
-			}
-			slot = uint32(next)
-			var buf [8]byte
-			binary.LittleEndian.PutUint64(buf[:], next+1)
-			cfg.Put(keyNextSlot, buf[:])
-		}
-
-		var slotBuf [4]byte
-		binary.LittleEndian.PutUint32(slotBuf[:], slot)
-		return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
+		slots := allocSlots(tx, 1)
+		slot = slots[0]
+		return putSlot(tx, id, slot)
 	})
 	return slot, err
 }
 
-func (m *MetaStore) PutSlot(id string, slot uint32) error {
-	return m.db.Update(func(tx *bolt.Tx) error {
-		var slotBuf [4]byte
-		binary.LittleEndian.PutUint32(slotBuf[:], slot)
-		return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
+// Insert allocates a slot for each id and stores its metadata in a single
+// transaction. beforeCommit runs inside the transaction once slots are known;
+// if it fails, nothing is committed.
+func (m *MetaStore) Insert(ids []string, metas [][]byte, beforeCommit func(slots []uint32) error) ([]uint32, error) {
+	var slots []uint32
+	err := m.db.Update(func(tx *bolt.Tx) error {
+		slots = allocSlots(tx, len(ids))
+		metaBucket := tx.Bucket(bucketMeta)
+		for i, id := range ids {
+			if err := putSlot(tx, id, slots[i]); err != nil {
+				return err
+			}
+			if err := metaBucket.Put([]byte(id), metas[i]); err != nil {
+				return err
+			}
+		}
+		return beforeCommit(slots)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return slots, nil
+}
+
+func allocSlots(tx *bolt.Tx, n int) []uint32 {
+	cfg := tx.Bucket(bucketConfig)
+	slots := make([]uint32, 0, n)
+
+	if raw := cfg.Get(keyFreeSlots); len(raw) >= 4 {
+		k := min(n, len(raw)/4)
+		for i := 0; i < k; i++ {
+			slots = append(slots, binary.LittleEndian.Uint32(raw[i*4:]))
+		}
+		cfg.Put(keyFreeSlots, append([]byte(nil), raw[k*4:]...))
+	}
+
+	if len(slots) < n {
+		var next uint64
+		if raw := cfg.Get(keyNextSlot); raw != nil {
+			next = binary.LittleEndian.Uint64(raw)
+		}
+		for len(slots) < n {
+			slots = append(slots, uint32(next))
+			next++
+		}
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], next)
+		cfg.Put(keyNextSlot, buf[:])
+	}
+	return slots
+}
+
+func putSlot(tx *bolt.Tx, id string, slot uint32) error {
+	var slotBuf [4]byte
+	binary.LittleEndian.PutUint32(slotBuf[:], slot)
+	return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
 }
 
 func (m *MetaStore) GetSlot(id string) (uint32, error) {
@@ -85,8 +119,12 @@ func (m *MetaStore) GetSlot(id string) (uint32, error) {
 	return slot, err
 }
 
+func encodeMeta(meta map[string]any) ([]byte, error) {
+	return msgpack.Marshal(meta)
+}
+
 func (m *MetaStore) PutMeta(id string, meta map[string]any) error {
-	data, err := msgpack.Marshal(meta)
+	data, err := encodeMeta(meta)
 	if err != nil {
 		return err
 	}

@@ -23,7 +23,8 @@ type walEntry struct {
 }
 
 type WAL struct {
-	f *os.File
+	f    *os.File
+	size int64
 }
 
 func openWAL(path string) (*WAL, []walEntry, error) {
@@ -32,7 +33,12 @@ func openWAL(path string) (*WAL, []walEntry, error) {
 		return nil, nil, err
 	}
 	entries, _ := replayWAL(f)
-	return &WAL{f: f}, entries, nil
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return &WAL{f: f, size: size}, entries, nil
 }
 
 func replayWAL(f *os.File) ([]walEntry, error) {
@@ -80,27 +86,52 @@ func replayWAL(f *os.File) ([]walEntry, error) {
 }
 
 func (w *WAL) Append(op opType, id string, slot uint32, embeddings []float32) error {
-	size := 1 + 4 + len(id) + 4 + 4 + len(embeddings)*4
-	buf := make([]byte, size)
-	off := 0
+	buf := make([]byte, 0, recordSize(id, embeddings))
+	return w.write(appendRecord(buf, op, id, slot, embeddings))
+}
 
-	buf[off] = byte(op)
-	off++
-	binary.LittleEndian.PutUint32(buf[off:], uint32(len(id)))
-	off += 4
-	copy(buf[off:], id)
-	off += len(id)
-	binary.LittleEndian.PutUint32(buf[off:], slot)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], uint32(len(embeddings)))
-	off += 4
-	for _, v := range embeddings {
-		binary.LittleEndian.PutUint32(buf[off:], math.Float32bits(v))
-		off += 4
+// AppendBatch encodes all entries into a single write.
+func (w *WAL) AppendBatch(entries []walEntry) error {
+	size := 0
+	for _, e := range entries {
+		size += recordSize(e.id, e.embeddings)
 	}
+	buf := make([]byte, 0, size)
+	for _, e := range entries {
+		buf = appendRecord(buf, e.op, e.id, e.slot, e.embeddings)
+	}
+	return w.write(buf)
+}
 
-	_, err := w.f.Write(buf)
-	return err
+func (w *WAL) write(buf []byte) error {
+	if _, err := w.f.Write(buf); err != nil {
+		// drop the partial write so later records stay aligned
+		w.f.Truncate(w.size)
+		w.f.Seek(w.size, io.SeekStart)
+		return err
+	}
+	w.size += int64(len(buf))
+	return nil
+}
+
+func (w *WAL) Size() int64 {
+	return w.size
+}
+
+func recordSize(id string, embeddings []float32) int {
+	return 1 + 4 + len(id) + 4 + 4 + len(embeddings)*4
+}
+
+func appendRecord(buf []byte, op opType, id string, slot uint32, embeddings []float32) []byte {
+	buf = append(buf, byte(op))
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(id)))
+	buf = append(buf, id...)
+	buf = binary.LittleEndian.AppendUint32(buf, slot)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(embeddings)))
+	for _, v := range embeddings {
+		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(v))
+	}
+	return buf
 }
 
 func (w *WAL) Sync() error {
@@ -111,8 +142,11 @@ func (w *WAL) Truncate() error {
 	if err := w.f.Truncate(0); err != nil {
 		return err
 	}
-	_, err := w.f.Seek(0, io.SeekStart)
-	return err
+	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	w.size = 0
+	return w.f.Sync()
 }
 
 func (w *WAL) Close() error {

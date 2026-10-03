@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"syscall"
@@ -82,28 +84,21 @@ func (vs *VectorStore) grow(minSlot int) error {
 }
 
 func (vs *VectorStore) Write(slot int, embeddings []float32) error {
+	if len(embeddings) != vs.dim {
+		return fmt.Errorf("vector store: expected %d dimensions, got %d", vs.dim, len(embeddings))
+	}
 	if slot >= vs.capacity {
 		if err := vs.grow(slot); err != nil {
 			return err
 		}
 	}
 	off := slot * vs.recordSize
+	rec := vs.data[off : off+vs.recordSize]
 	for i, v := range embeddings {
-		bits := math.Float32bits(v)
-		vs.data[off+i*4+0] = byte(bits)
-		vs.data[off+i*4+1] = byte(bits >> 8)
-		vs.data[off+i*4+2] = byte(bits >> 16)
-		vs.data[off+i*4+3] = byte(bits >> 24)
+		binary.LittleEndian.PutUint32(rec[i*4:], math.Float32bits(v))
 	}
-	vs.data[off+vs.dim*4] = 0
-
-	pageSize := syscall.Getpagesize()
-	pageStart := (off / pageSize) * pageSize
-	pageEnd := ((off + vs.recordSize + pageSize - 1) / pageSize) * pageSize
-	if pageEnd > len(vs.data) {
-		pageEnd = len(vs.data)
-	}
-	return unix.Msync(vs.data[pageStart:pageEnd], unix.MS_SYNC)
+	rec[vs.dim*4] = 0
+	return nil
 }
 
 func (vs *VectorStore) Read(slot int) ([]float32, bool) {
@@ -111,16 +106,13 @@ func (vs *VectorStore) Read(slot int) ([]float32, bool) {
 		return nil, false
 	}
 	off := slot * vs.recordSize
-	if vs.data[off+vs.dim*4] == deletedFlag {
+	rec := vs.data[off : off+vs.recordSize]
+	if rec[vs.dim*4] == deletedFlag {
 		return nil, false
 	}
 	emb := make([]float32, vs.dim)
 	for i := range emb {
-		bits := uint32(vs.data[off+i*4]) |
-			uint32(vs.data[off+i*4+1])<<8 |
-			uint32(vs.data[off+i*4+2])<<16 |
-			uint32(vs.data[off+i*4+3])<<24
-		emb[i] = math.Float32frombits(bits)
+		emb[i] = math.Float32frombits(binary.LittleEndian.Uint32(rec[i*4:]))
 	}
 	return emb, true
 }
@@ -131,9 +123,21 @@ func (vs *VectorStore) Delete(slot int) {
 	}
 }
 
+// Flush writes dirty pages of the mapping and the file size to disk.
+func (vs *VectorStore) Flush() error {
+	if err := unix.Msync(vs.data, unix.MS_SYNC); err != nil {
+		return err
+	}
+	return vs.f.Sync()
+}
+
 func (vs *VectorStore) Close() error {
+	flushErr := vs.Flush()
 	syscall.Munmap(vs.data)
-	return vs.f.Close()
+	if err := vs.f.Close(); err != nil {
+		return err
+	}
+	return flushErr
 }
 
 // Live reports whether slot holds a non-deleted record, without decoding it.

@@ -100,19 +100,21 @@ func (c *Collection) AddVectors(ctx context.Context, vectors map[string]core.Vec
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	batch := make([]storage.StoredVector, 0, len(vectors))
 	for id, v := range vectors {
 		if len(v.Embeddings) != c.dim {
 			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", id, c.dim, len(v.Embeddings))
 		}
+		batch = append(batch, storage.StoredVector{Id: id, Embeddings: v.Embeddings, Metadata: v.Metadata})
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for id, v := range vectors {
-		if err := c.store.Add(id, v.Embeddings, v.Metadata); err != nil {
-			return err
-		}
-		c.index.AddVector(id, core.Vector{Embeddings: v.Embeddings})
+	if err := c.store.AddBatch(batch); err != nil {
+		return err
+	}
+	for _, v := range batch {
+		c.index.AddVector(v.Id, core.Vector{Embeddings: v.Embeddings})
 	}
 	return nil
 }
