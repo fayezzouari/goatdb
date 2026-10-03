@@ -124,6 +124,33 @@ func BenchmarkStoreAdd(b *testing.B) {
 	}
 }
 
+func BenchmarkStoreAddBatch(b *testing.B) {
+	const batchSize = 1000
+	for _, dim := range []int{128, 1536} {
+		dim := dim
+		s, err := Open(b.TempDir(), dim)
+		if err != nil {
+			b.Fatal(err)
+		}
+		emb := randomEmbeddings(dim)
+		meta := map[string]any{"label": "bench"}
+		b.Run(fmt.Sprintf("dim%d/batch%d", dim, batchSize), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				batch := make([]StoredVector, batchSize)
+				for j := range batch {
+					batch[j] = StoredVector{Id: benchID(i*batchSize + j), Embeddings: emb, Metadata: meta}
+				}
+				if err := s.AddBatch(batch); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.N*batchSize)/b.Elapsed().Seconds(), "vectors/s")
+		})
+		s.Close()
+	}
+}
+
 func BenchmarkStoreGet(b *testing.B) {
 	for _, dim := range []int{128, 1536} {
 		dim := dim
