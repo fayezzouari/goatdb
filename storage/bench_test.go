@@ -151,6 +151,33 @@ func BenchmarkStoreAddBatch(b *testing.B) {
 	}
 }
 
+func BenchmarkWALReplay(b *testing.B) {
+	const records = 10000
+	for _, dim := range []int{128, 1536} {
+		dim := dim
+		path := b.TempDir() + "/wal.log"
+		wal, _, err := openWAL(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		emb := randomEmbeddings(dim)
+		for i := 0; i < records; i++ {
+			wal.Append(opInsert, benchID(i), uint32(i), emb)
+		}
+		wal.Close()
+		b.Run(fmt.Sprintf("dim%d/n%d", dim, records), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				w, entries, err := openWAL(path)
+				if err != nil || len(entries) != records {
+					b.Fatalf("replayed %d entries: %v", len(entries), err)
+				}
+				w.Close()
+			}
+		})
+	}
+}
+
 func BenchmarkStoreGet(b *testing.B) {
 	for _, dim := range []int{128, 1536} {
 		dim := dim
