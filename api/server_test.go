@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/fayez/goatdb/api"
-	"github.com/fayez/goatdb/db"
+	"github.com/fayezzouari/goatdb/api"
+	"github.com/fayezzouari/goatdb/db"
 )
 
 func setup(t *testing.T) (http.Handler, func()) {

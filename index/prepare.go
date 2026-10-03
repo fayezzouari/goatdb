@@ -3,7 +3,7 @@ package index
 import (
 	"math/rand"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 // prepareVectors returns vectors in the form m.Dist expects. When the metric

@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 var benchMetrics = []core.DistanceMetric{core.Cosine, core.Euclidean, core.DotProduct}

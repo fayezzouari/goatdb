@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/fayez/goatdb/db"
+	"github.com/fayezzouari/goatdb/db"
 )
 
 type Handler struct {

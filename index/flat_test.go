@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 func TestFlatIndexSearch(t *testing.T) {

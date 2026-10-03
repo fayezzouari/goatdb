@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/fayez/goatdb/core"
-	"github.com/fayez/goatdb/index"
+	"github.com/fayezzouari/goatdb/core"
+	"github.com/fayezzouari/goatdb/index"
 )
 
 type collectionConfig struct {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 func TestCollectionAddExistingID(t *testing.T) {

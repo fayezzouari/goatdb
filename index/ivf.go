@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/fayez/goatdb/core"
+	"github.com/fayezzouari/goatdb/core"
 )
 
 // ivfList stores one inverted list as parallel slices — contiguous iteration,

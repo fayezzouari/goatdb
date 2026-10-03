@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/fayez/goatdb/api/handlers"
-	"github.com/fayez/goatdb/api/middleware"
-	"github.com/fayez/goatdb/db"
-	"github.com/fayez/goatdb/web"
+	"github.com/fayezzouari/goatdb/api/handlers"
+	"github.com/fayezzouari/goatdb/api/middleware"
+	"github.com/fayezzouari/goatdb/db"
+	"github.com/fayezzouari/goatdb/web"
 )
 
 type Server struct {

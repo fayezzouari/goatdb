@@ -1,4 +1,4 @@
-module github.com/fayez/goatdb
+module github.com/fayezzouari/goatdb
 
 go 1.22
 

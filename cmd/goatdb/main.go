@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fayez/goatdb/api"
-	"github.com/fayez/goatdb/db"
+	"github.com/fayezzouari/goatdb/api"
+	"github.com/fayezzouari/goatdb/db"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
