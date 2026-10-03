@@ -147,6 +147,22 @@ func BenchmarkHNSWSearch(b *testing.B) {
 	}
 }
 
+func BenchmarkHNSWTrain(b *testing.B) {
+	const n = 5000
+	vecs := make([]core.Vector, n)
+	idx := NewHNSWIndex(benchDim, 16, 100, 50, core.Euclidean)
+	for i := range vecs {
+		vecs[i] = randomVector(benchDim)
+		idx.AddVector(randomID(i), vecs[i])
+	}
+	b.Run(sizeLabel(n), func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			idx.Train(vecs)
+		}
+	})
+}
+
 func BenchmarkHNSWSearchParallel(b *testing.B) {
 	idx := populateHNSW(10000)
 	queries := make([]core.Vector, 64)

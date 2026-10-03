@@ -1,8 +1,11 @@
 package index
 
 import (
+	"encoding/gob"
 	"fmt"
+	"math"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 
@@ -268,6 +271,157 @@ func TestHNSWRecallClustered(t *testing.T) {
 	}
 	if recall < 0.9 {
 		t.Errorf("recall at ef=80 too low: %.1f%% (expected >= 90%%)", recall*100)
+	}
+}
+
+// checkSQCodes verifies that every indexed vector's int8 code matches the
+// current codebook.
+func checkSQCodes(t *testing.T, h *HNSWIndex) {
+	t.Helper()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.codebook == nil {
+		t.Fatal("expected a codebook after Train")
+	}
+	for id, node := range h.nodes {
+		want := h.codebook.Quantize(h.pool.Get(node.poolIdx))
+		got := h.sqPool.Get(node.poolIdx)
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("vector %s: stale int8 code at dim %d", id, i)
+			}
+		}
+	}
+}
+
+// TestHNSWSearchDuringTrain checks that Search and AddVector run while Train
+// is quantizing, and that vectors added meanwhile get the new codebook.
+func TestHNSWSearchDuringTrain(t *testing.T) {
+	const dim = 16
+	r := rand.New(rand.NewSource(9))
+	vecs := make([]core.Vector, trainChunk+100)
+	for i := range vecs {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = r.Float32()
+		}
+		vecs[i] = core.Vector{Embeddings: emb}
+	}
+	h := NewHNSWIndex(dim, 8, 32, 16, core.Euclidean)
+	for i, v := range vecs {
+		h.AddVector(fmt.Sprintf("v%d", i), v)
+	}
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	testHookTrainChunk = func() {
+		once.Do(func() {
+			close(paused)
+			<-resume
+		})
+	}
+	t.Cleanup(func() { testHookTrainChunk = nil })
+
+	done := make(chan struct{})
+	go func() {
+		h.Train(vecs)
+		close(done)
+	}()
+
+	<-paused
+	// Train is mid-way through quantizing; neither call may block.
+	if res := h.Search(vecs[0], 1); len(res) != 1 || res[0].Id != "v0" {
+		t.Errorf("search during Train: got %v", res)
+	}
+	h.AddVector("during", core.Vector{Embeddings: vecs[1].Embeddings})
+	close(resume)
+	<-done
+
+	checkSQCodes(t, h)
+	if res := h.Search(vecs[2], 1); len(res) != 1 || res[0].Id != "v2" {
+		t.Errorf("search after Train: got %v", res)
+	}
+}
+
+// TestHNSWConcurrentTrainAddSearch runs Train, AddVector and Search together;
+// run it with -race.
+func TestHNSWConcurrentTrainAddSearch(t *testing.T) {
+	const dim = 16
+	r := rand.New(rand.NewSource(13))
+	vec := func(r *rand.Rand) core.Vector {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = r.Float32()
+		}
+		return core.Vector{Embeddings: emb}
+	}
+	h := NewHNSWIndex(dim, 8, 32, 16, core.Euclidean)
+	train := make([]core.Vector, 500)
+	for i := range train {
+		train[i] = vec(r)
+		h.AddVector(fmt.Sprintf("seed%d", i), train[i])
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5; i++ {
+			h.Train(train)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(14))
+		for i := 0; i < 300; i++ {
+			h.AddVector(fmt.Sprintf("w%d", i), vec(r))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(15))
+		for i := 0; i < 300; i++ {
+			if res := h.Search(vec(r), 5); len(res) != 5 {
+				t.Errorf("expected 5 results, got %d", len(res))
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	checkSQCodes(t, h)
+}
+
+// TestHNSWLoadLegacyPQ checks that files written with PQ data still load.
+func TestHNSWLoadLegacyPQ(t *testing.T) {
+	path := t.TempDir() + "/hnsw.bin"
+	state := hnswState{
+		Dim: 2, M: 4, EfConstruction: 20, Ef: 10, ML: 1 / math.Log(4),
+		DistanceMetric: core.Euclidean,
+		EntryPoint:     "a",
+		MaxLayer:       0,
+		Nodes: map[string]hnswNodeState{
+			"a": {Embeddings: []float32{1, 0}, Connections: [][]string{{"b"}}},
+			"b": {Embeddings: []float32{0, 1}, Connections: [][]string{{"a"}}},
+		},
+		SQMin: 0, SQScale: 1.0 / 255, HasSQ: true,
+		PQNSubs: 1, PQNCentroids: 2, PQCentroids: []float32{1, 0, 0, 1}, HasPQ: true,
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gob.NewEncoder(f).Encode(state); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	h := NewHNSWIndex(2, 4, 20, 10, core.Euclidean)
+	if err := h.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if res := h.Search(core.Vector{Embeddings: []float32{0, 1}}, 1); len(res) != 1 || res[0].Id != "b" {
+		t.Errorf("expected 'b', got %v", res)
 	}
 }
 

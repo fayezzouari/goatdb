@@ -195,10 +195,11 @@ func (c *Collection) Train(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	// Only reading the store needs the collection lock. The index does its
+	// own locking, so training must not block searches and writes.
+	c.mu.RLock()
 	svecs, err := c.store.LoadEmbeddings()
+	c.mu.RUnlock()
 	if err != nil {
 		return err
 	}

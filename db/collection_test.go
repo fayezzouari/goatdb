@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/fayez/goatdb/core"
@@ -128,4 +130,60 @@ func TestCollectionPersistence(t *testing.T) {
 	if len(results) == 0 || results[0].Id != "x" {
 		t.Errorf("expected 'x' after reload, got %v", results)
 	}
+}
+
+// TestCollectionTrainConcurrent runs Train alongside writes and searches on
+// an HNSW collection; run it with -race.
+func TestCollectionTrainConcurrent(t *testing.T) {
+	const dim = 8
+	idx := index.NewHNSWIndex(dim, 8, 32, 16, core.Euclidean)
+	col, err := newCollection("train", dim, core.Euclidean, "hnsw", t.TempDir(), idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { col.Close() })
+
+	vec := func(i int) core.Vector {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = float32((i*7+j*13)%101) / 101
+		}
+		return core.Vector{Embeddings: emb}
+	}
+	for i := 0; i < 50; i++ {
+		if err := col.AddVector(ctx, fmt.Sprintf("seed%d", i), vec(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			if err := col.Train(ctx); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 30; i++ {
+			if err := col.AddVector(ctx, fmt.Sprintf("w%d", i), vec(1000+i)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := col.Search(ctx, vec(i), 5); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
