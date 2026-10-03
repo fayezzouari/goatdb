@@ -55,6 +55,24 @@ func BenchmarkRank(b *testing.B) {
 	}
 }
 
+// BenchmarkScalar measures the pure-Go fallback used on CPUs without SIMD.
+func BenchmarkScalar(b *testing.B) {
+	for _, k := range []struct {
+		name string
+		fn   func(a, b []float32) float32
+	}{{"dot", dotScalar}, {"l2sq", l2SqScalar}} {
+		for _, dim := range benchDims {
+			x, y := benchPair(dim)
+			b.Run(fmt.Sprintf("%s/%d", k.name, dim), func(b *testing.B) {
+				b.SetBytes(int64(dim * 8))
+				for i := 0; i < b.N; i++ {
+					sinkF32 = k.fn(x, y)
+				}
+			})
+		}
+	}
+}
+
 func BenchmarkL2Sq(b *testing.B) {
 	for _, dim := range benchDims {
 		x, y := benchPair(dim)

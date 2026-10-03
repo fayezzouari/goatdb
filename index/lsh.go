@@ -17,7 +17,7 @@ type lshTable struct {
 
 // LSHIndex is a multi-probe random-hyperplane LSH index.
 // Vectors are stored in a contiguous VectorPool; hash computation uses the
-// AVX2-accelerated dot product from core when available.
+// SIMD-accelerated dot product from core when available.
 type LSHIndex struct {
 	mu             sync.RWMutex
 	dim            int
@@ -76,7 +76,7 @@ func NewLSHIndex(dim, L, K int, metric core.DistanceMetric) *LSHIndex {
 
 // hashVec computes the K-bit bucket key for vector v in table t.
 // Each bit is the sign of the dot product with the corresponding hyperplane.
-// Uses core.Dot (AVX2 dispatch) for each dot product.
+// Uses core.Dot (SIMD dispatch) for each dot product.
 func (l *LSHIndex) hashVec(t *lshTable, v []float32) uint64 {
 	var h uint64
 	for i, hp := range t.hyperplanes {

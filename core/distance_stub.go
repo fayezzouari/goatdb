@@ -1,8 +1,8 @@
-//go:build !amd64
+//go:build !amd64 && !arm64
 
 package core
 
-const hasAVX2 = false
+const hasSIMD = false
 
-func dotProductAVX2(a, b *float32, n int) float32 { panic("unreachable") }
-func l2SquaredAVX2(a, b *float32, n int) float32  { panic("unreachable") }
+func dotSIMD(a, b *float32, n int) float32  { panic("unreachable") }
+func l2SqSIMD(a, b *float32, n int) float32 { panic("unreachable") }

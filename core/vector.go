@@ -47,17 +47,17 @@ func DistSlices(a, b []float32, metric DistanceMetric) float32 {
 
 // Dot returns the raw dot product of a and b.
 func Dot(a, b []float32) float32 {
-	if hasAVX2 && len(a) > 0 {
-		return dotProductAVX2(&a[0], &b[0], len(a))
+	if hasSIMD && len(a) > 0 {
+		return dotSIMD(&a[0], &b[0], len(a))
 	}
 	return dotScalar(a, b)
 }
 
 // L2SqSlices returns the squared euclidean distance between a and b without
-// taking the square root — safe for comparison/ranking. Uses AVX2 when available.
+// taking the square root — safe for comparison/ranking. Uses SIMD when available.
 func L2SqSlices(a, b []float32) float32 {
-	if hasAVX2 && len(a) > 0 {
-		return l2SquaredAVX2(&a[0], &b[0], len(a))
+	if hasSIMD && len(a) > 0 {
+		return l2SqSIMD(&a[0], &b[0], len(a))
 	}
 	return l2SqScalar(a, b)
 }
@@ -80,27 +80,39 @@ func manhattanSlices(a, b []float32) float32 {
 	return distance
 }
 
+// dotScalar and l2SqScalar use four independent accumulators so the adds
+// pipeline, and reslice both inputs so the compiler drops bounds checks.
 func dotScalar(a, b []float32) float32 {
-	n := len(a)
+	b = b[:len(a)]
 	var s0, s1, s2, s3 float32
-	i := 0
-	for ; i <= n-8; i += 8 {
-		s0 += a[i+0]*b[i+0] + a[i+1]*b[i+1]
-		s1 += a[i+2]*b[i+2] + a[i+3]*b[i+3]
-		s2 += a[i+4]*b[i+4] + a[i+5]*b[i+5]
-		s3 += a[i+6]*b[i+6] + a[i+7]*b[i+7]
+	for len(a) >= 8 && len(b) >= 8 {
+		s0 += a[0]*b[0] + a[4]*b[4]
+		s1 += a[1]*b[1] + a[5]*b[5]
+		s2 += a[2]*b[2] + a[6]*b[6]
+		s3 += a[3]*b[3] + a[7]*b[7]
+		a, b = a[8:], b[8:]
 	}
-	for ; i < n; i++ {
+	for i := range a {
 		s0 += a[i] * b[i]
 	}
-	return s0 + s1 + s2 + s3
+	return (s0 + s1) + (s2 + s3)
 }
 
 func l2SqScalar(a, b []float32) float32 {
-	var s float32
+	b = b[:len(a)]
+	var s0, s1, s2, s3 float32
+	for len(a) >= 8 && len(b) >= 8 {
+		d0, d1, d2, d3 := a[0]-b[0], a[1]-b[1], a[2]-b[2], a[3]-b[3]
+		d4, d5, d6, d7 := a[4]-b[4], a[5]-b[5], a[6]-b[6], a[7]-b[7]
+		s0 += d0*d0 + d4*d4
+		s1 += d1*d1 + d5*d5
+		s2 += d2*d2 + d6*d6
+		s3 += d3*d3 + d7*d7
+		a, b = a[8:], b[8:]
+	}
 	for i := range a {
 		d := a[i] - b[i]
-		s += d * d
+		s0 += d * d
 	}
-	return s
+	return (s0 + s1) + (s2 + s3)
 }
