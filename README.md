@@ -174,7 +174,7 @@ POST /collections
 }
 ```
 
-`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`
+`metric` options: `cosine`, `euclidean`, `dot_product`, `manhattan`. Results are ordered by ascending distance; for `dot_product` the distance is the negated dot product, so the largest dot product comes first.
 `index_type` options: `flat`, `lsh`, `ivf`, `hnsw` — defaults to `flat` if omitted
 
 Response `201`:
@@ -246,6 +246,8 @@ Response `201`:
 { "id": "doc-001" }
 ```
 
+Returns `409` if a vector with this id already exists. Use `PUT` to update it.
+
 ---
 
 **Bulk add**
@@ -268,7 +270,7 @@ Response `201`:
 { "inserted": 2 }
 ```
 
-All vectors are validated before any are written. If one has a wrong dimension, the entire batch is rejected.
+All vectors are validated before any are written. If one has a wrong dimension or an id appears twice in the request, the entire batch is rejected with `400`. If any id already exists, the entire batch is rejected with `409`.
 
 ---
 
@@ -331,6 +333,11 @@ POST /collections/{name}/search
 
 `top_k` defaults to 10 if omitted or zero.
 
+| Field              | Default | Description                        |
+|--------------------|---------|------------------------------------|
+| `include_vectors`  | `false` | Return each result's `embeddings`  |
+| `include_metadata` | `true`  | Return each result's `metadata`    |
+
 Response `200`:
 ```json
 {
@@ -338,12 +345,13 @@ Response `200`:
     {
       "id": "doc-001",
       "distance": 0.012,
-      "embeddings": [0.1, 0.4, 0.9],
       "metadata": { "title": "Introduction to Go" }
     }
   ]
 }
 ```
+
+With `"include_vectors": true`, each result also carries `"embeddings": [0.1, 0.4, 0.9]`. Leaving vectors out (and metadata too, with `"include_metadata": false`) skips the storage reads and keeps responses small, which matters at large `top_k` and `dim`.
 
 Results are sorted by distance ascending (nearest first). The distance unit depends on the metric chosen at collection creation time.
 

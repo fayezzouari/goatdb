@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	msgpack "github.com/shamaton/msgpack/v2"
 	bolt "go.etcd.io/bbolt"
@@ -16,7 +17,11 @@ var (
 	keyFreeSlots = []byte("free_slots")
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound    = errors.New("not found")
+	ErrExists      = errors.New("already exists")
+	ErrDuplicateID = errors.New("duplicate id in batch")
+)
 
 type MetaStore struct {
 	db *bolt.DB
@@ -41,35 +46,76 @@ func openMetaStore(path string) (*MetaStore, error) {
 func (m *MetaStore) AllocSlot(id string) (uint32, error) {
 	var slot uint32
 	err := m.db.Update(func(tx *bolt.Tx) error {
-		cfg := tx.Bucket(bucketConfig)
-
-		if raw := cfg.Get(keyFreeSlots); len(raw) >= 4 {
-			slot = binary.LittleEndian.Uint32(raw[:4])
-			cfg.Put(keyFreeSlots, raw[4:])
-		} else {
-			var next uint64
-			if raw := cfg.Get(keyNextSlot); raw != nil {
-				next = binary.LittleEndian.Uint64(raw)
-			}
-			slot = uint32(next)
-			var buf [8]byte
-			binary.LittleEndian.PutUint64(buf[:], next+1)
-			cfg.Put(keyNextSlot, buf[:])
-		}
-
-		var slotBuf [4]byte
-		binary.LittleEndian.PutUint32(slotBuf[:], slot)
-		return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
+		slots := allocSlots(tx, 1)
+		slot = slots[0]
+		return putSlot(tx, id, slot)
 	})
 	return slot, err
 }
 
-func (m *MetaStore) PutSlot(id string, slot uint32) error {
-	return m.db.Update(func(tx *bolt.Tx) error {
-		var slotBuf [4]byte
-		binary.LittleEndian.PutUint32(slotBuf[:], slot)
-		return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
+// Insert allocates a slot for each id and stores its metadata in a single
+// transaction. It fails with ErrExists if any id is already present.
+// beforeCommit runs inside the transaction once slots are known; if it fails,
+// nothing is committed.
+func (m *MetaStore) Insert(ids []string, metas [][]byte, beforeCommit func(slots []uint32) error) ([]uint32, error) {
+	var slots []uint32
+	err := m.db.Update(func(tx *bolt.Tx) error {
+		slotBucket := tx.Bucket(bucketSlots)
+		for _, id := range ids {
+			if slotBucket.Get([]byte(id)) != nil {
+				return fmt.Errorf("vector %q %w", id, ErrExists)
+			}
+		}
+		slots = allocSlots(tx, len(ids))
+		metaBucket := tx.Bucket(bucketMeta)
+		for i, id := range ids {
+			if err := putSlot(tx, id, slots[i]); err != nil {
+				return err
+			}
+			if err := metaBucket.Put([]byte(id), metas[i]); err != nil {
+				return err
+			}
+		}
+		return beforeCommit(slots)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return slots, nil
+}
+
+func allocSlots(tx *bolt.Tx, n int) []uint32 {
+	cfg := tx.Bucket(bucketConfig)
+	slots := make([]uint32, 0, n)
+
+	if raw := cfg.Get(keyFreeSlots); len(raw) >= 4 {
+		k := min(n, len(raw)/4)
+		for i := 0; i < k; i++ {
+			slots = append(slots, binary.LittleEndian.Uint32(raw[i*4:]))
+		}
+		cfg.Put(keyFreeSlots, append([]byte(nil), raw[k*4:]...))
+	}
+
+	if len(slots) < n {
+		var next uint64
+		if raw := cfg.Get(keyNextSlot); raw != nil {
+			next = binary.LittleEndian.Uint64(raw)
+		}
+		for len(slots) < n {
+			slots = append(slots, uint32(next))
+			next++
+		}
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], next)
+		cfg.Put(keyNextSlot, buf[:])
+	}
+	return slots
+}
+
+func putSlot(tx *bolt.Tx, id string, slot uint32) error {
+	var slotBuf [4]byte
+	binary.LittleEndian.PutUint32(slotBuf[:], slot)
+	return tx.Bucket(bucketSlots).Put([]byte(id), slotBuf[:])
 }
 
 func (m *MetaStore) GetSlot(id string) (uint32, error) {
@@ -85,8 +131,12 @@ func (m *MetaStore) GetSlot(id string) (uint32, error) {
 	return slot, err
 }
 
+func encodeMeta(meta map[string]any) ([]byte, error) {
+	return msgpack.Marshal(meta)
+}
+
 func (m *MetaStore) PutMeta(id string, meta map[string]any) error {
-	data, err := msgpack.Marshal(meta)
+	data, err := encodeMeta(meta)
 	if err != nil {
 		return err
 	}
@@ -142,4 +192,41 @@ func (m *MetaStore) AllSlots() ([]string, []uint32, error) {
 
 func (m *MetaStore) Close() error {
 	return m.db.Close()
+}
+
+// SlotMeta is the result of a batched slot/metadata lookup for one id.
+type SlotMeta struct {
+	Slot     uint32
+	Found    bool
+	Metadata map[string]any
+}
+
+// GetSlotsAndMeta resolves the slot (and optionally the metadata) for every id
+// inside a single read transaction. The result is aligned with ids; entries
+// whose id is unknown have Found == false.
+func (m *MetaStore) GetSlotsAndMeta(ids []string, withMeta bool) ([]SlotMeta, error) {
+	out := make([]SlotMeta, len(ids))
+	err := m.db.View(func(tx *bolt.Tx) error {
+		slots := tx.Bucket(bucketSlots)
+		metas := tx.Bucket(bucketMeta)
+		for i, id := range ids {
+			key := []byte(id)
+			raw := slots.Get(key)
+			if raw == nil {
+				continue
+			}
+			out[i].Slot = binary.LittleEndian.Uint32(raw)
+			out[i].Found = true
+			if !withMeta {
+				continue
+			}
+			if mraw := metas.Get(key); mraw != nil {
+				if err := msgpack.Unmarshal(mraw, &out[i].Metadata); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
 }

@@ -13,6 +13,7 @@ type FlatIndex struct {
 	mu             sync.RWMutex
 	dim            int
 	distanceMetric core.DistanceMetric
+	metric         core.Metric
 	pool           *core.VectorPool
 	idToSlot       map[string]int32
 	slotToID       []string
@@ -22,6 +23,7 @@ func NewFlatIndex(dim int, metric core.DistanceMetric) *FlatIndex {
 	return &FlatIndex{
 		dim:            dim,
 		distanceMetric: metric,
+		metric:         core.ResolveMetric(metric),
 		pool:           core.NewVectorPool(dim, 64),
 		idToSlot:       make(map[string]int32),
 	}
@@ -31,6 +33,7 @@ func (f *FlatIndex) AddVector(id string, vector core.Vector) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	slot := f.pool.Add(vector.Embeddings)
+	f.metric.PrepareInPlace(f.pool.Get(slot))
 	f.idToSlot[id] = slot
 	for int(slot) >= len(f.slotToID) {
 		f.slotToID = append(f.slotToID, "")
@@ -66,11 +69,12 @@ func (f *FlatIndex) DeleteVector(id string) bool {
 func (f *FlatIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	q := query.Embeddings
+	q := f.metric.Prepare(query.Embeddings)
+	distFn := f.metric.Dist
 	rh := &resultHeap{}
 	heap.Init(rh)
 	f.pool.ForEach(func(slot int32, emb []float32) {
-		dist := core.DistSlices(q, emb, f.distanceMetric)
+		dist := distFn(q, emb)
 		result := core.SearchResult{Id: f.slotToID[slot], Distance: dist}
 		if rh.Len() < topK {
 			heap.Push(rh, result)
@@ -79,6 +83,9 @@ func (f *FlatIndex) Search(query core.Vector, topK int) []core.SearchResult {
 			heap.Push(rh, result)
 		}
 	})
+	for i := range *rh {
+		(*rh)[i].Distance = f.metric.Finalize((*rh)[i].Distance)
+	}
 	return []core.SearchResult(*rh)
 }
 
@@ -86,6 +93,7 @@ type flatState struct {
 	Dim            int
 	DistanceMetric core.DistanceMetric
 	Vectors        map[string][]float32
+	Normalized     bool
 }
 
 func (f *FlatIndex) Save(path string) error {
@@ -106,6 +114,7 @@ func (f *FlatIndex) Save(path string) error {
 		Dim:            f.dim,
 		DistanceMetric: f.distanceMetric,
 		Vectors:        vectors,
+		Normalized:     f.metric.Normalizes(),
 	})
 }
 
@@ -123,11 +132,15 @@ func (f *FlatIndex) Load(path string) error {
 	}
 	f.dim = s.Dim
 	f.distanceMetric = s.DistanceMetric
+	f.metric = core.ResolveMetric(s.DistanceMetric)
 	f.pool = core.NewVectorPool(s.Dim, len(s.Vectors))
 	f.idToSlot = make(map[string]int32, len(s.Vectors))
 	f.slotToID = make([]string, 0, len(s.Vectors))
 	for id, emb := range s.Vectors {
 		slot := f.pool.Add(emb)
+		if !s.Normalized {
+			f.metric.PrepareInPlace(f.pool.Get(slot))
+		}
 		f.idToSlot[id] = slot
 		for int(slot) >= len(f.slotToID) {
 			f.slotToID = append(f.slotToID, "")

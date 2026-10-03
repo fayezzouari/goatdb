@@ -119,6 +119,27 @@ func TestFullFlow(t *testing.T) {
 	if len(results) == 0 || results[0]["id"] != "a" {
 		t.Errorf("search: expected 'a' first, got %v", results)
 	}
+	// Metadata is returned by default, embeddings are not
+	if len(results) > 0 {
+		if m, _ := results[0]["metadata"].(map[string]any); m["label"] != "A" {
+			t.Errorf("search: expected metadata label=A by default, got %v", results[0])
+		}
+		if _, ok := results[0]["embeddings"]; ok {
+			t.Errorf("search: embeddings should be omitted by default, got %v", results[0])
+		}
+	}
+
+	// Search with include_vectors returns embeddings
+	resp = do(t, http.MethodPost, base+"/collections/items/search", map[string]any{
+		"embeddings": []float32{1, 0, 0}, "top_k": 1, "include_vectors": true,
+	})
+	var withVecs map[string][]map[string]any
+	decode(t, resp, &withVecs)
+	if r := withVecs["results"]; len(r) != 1 {
+		t.Errorf("search include_vectors: expected 1 result, got %v", r)
+	} else if emb, _ := r[0]["embeddings"].([]any); len(emb) != 3 {
+		t.Errorf("search include_vectors: expected 3-dim embeddings, got %v", r[0])
+	}
 	// Results must be sorted by distance
 	if len(results) > 1 {
 		d0 := results[0]["distance"].(float64)

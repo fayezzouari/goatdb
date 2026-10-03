@@ -1,6 +1,7 @@
 package index
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/fayezzouari/goatdb/core"
@@ -66,5 +67,28 @@ func TestFlatIndexSaveLoad(t *testing.T) {
 	}
 	if _, ok := idx2.GetVector("a"); !ok {
 		t.Error("vector 'a' not found after load")
+	}
+}
+
+func TestFlatIndexDotProductOrder(t *testing.T) {
+	idx := NewFlatIndex(2, core.DotProduct)
+	idx.AddVector("low", core.Vector{Embeddings: []float32{1, 0}})
+	idx.AddVector("high", core.Vector{Embeddings: []float32{5, 0}})
+	idx.AddVector("mid", core.Vector{Embeddings: []float32{3, 0}})
+	idx.AddVector("neg", core.Vector{Embeddings: []float32{-2, 0}})
+
+	results := idx.Search(core.Vector{Embeddings: []float32{1, 0}}, 3)
+	sort.Slice(results, func(i, j int) bool { return results[i].Distance < results[j].Distance })
+	want := []string{"high", "mid", "low"}
+	if len(results) != len(want) {
+		t.Fatalf("expected %d results, got %d", len(want), len(results))
+	}
+	for i, id := range want {
+		if results[i].Id != id {
+			t.Errorf("result %d: expected %q, got %q", i, id, results[i].Id)
+		}
+	}
+	if results[0].Distance != -5 {
+		t.Errorf("expected distance -5 for best match, got %v", results[0].Distance)
 	}
 }

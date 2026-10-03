@@ -12,6 +12,11 @@ import (
 	"github.com/fayezzouari/goatdb/storage"
 )
 
+var (
+	ErrExists      = storage.ErrExists
+	ErrDuplicateID = storage.ErrDuplicateID
+)
+
 type Collection struct {
 	name      string
 	dim       int
@@ -96,23 +101,38 @@ func (c *Collection) AddVector(ctx context.Context, id string, vector core.Vecto
 	return nil
 }
 
-func (c *Collection) AddVectors(ctx context.Context, vectors map[string]core.Vector) error {
+// VectorEntry is a vector with its id, as passed to AddVectors.
+type VectorEntry struct {
+	Id string
+	core.Vector
+}
+
+// AddVectors inserts all vectors or none. It fails with ErrDuplicateID if an id
+// repeats within the batch and with ErrExists if an id is already stored.
+func (c *Collection) AddVectors(ctx context.Context, vectors []VectorEntry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for id, v := range vectors {
+	batch := make([]storage.StoredVector, 0, len(vectors))
+	seen := make(map[string]struct{}, len(vectors))
+	for _, v := range vectors {
 		if len(v.Embeddings) != c.dim {
-			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", id, c.dim, len(v.Embeddings))
+			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", v.Id, c.dim, len(v.Embeddings))
 		}
+		if _, dup := seen[v.Id]; dup {
+			return fmt.Errorf("vector %q: %w", v.Id, ErrDuplicateID)
+		}
+		seen[v.Id] = struct{}{}
+		batch = append(batch, storage.StoredVector{Id: v.Id, Embeddings: v.Embeddings, Metadata: v.Metadata})
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for id, v := range vectors {
-		if err := c.store.Add(id, v.Embeddings, v.Metadata); err != nil {
-			return err
-		}
-		c.index.AddVector(id, core.Vector{Embeddings: v.Embeddings})
+	if err := c.store.AddBatch(batch); err != nil {
+		return err
+	}
+	for _, v := range batch {
+		c.index.AddVector(v.Id, core.Vector{Embeddings: v.Embeddings})
 	}
 	return nil
 }
@@ -163,7 +183,20 @@ func (c *Collection) DeleteVector(ctx context.Context, id string) error {
 	return nil
 }
 
+// SearchOptions controls how search results are hydrated from storage.
+type SearchOptions struct {
+	IncludeVectors  bool
+	IncludeMetadata bool
+}
+
+// Search returns the topK nearest vectors with embeddings and metadata attached.
 func (c *Collection) Search(ctx context.Context, query core.Vector, topK int) ([]core.SearchResult, error) {
+	return c.SearchWithOptions(ctx, query, topK, SearchOptions{IncludeVectors: true, IncludeMetadata: true})
+}
+
+// SearchWithOptions returns the topK nearest vectors, hydrating only the parts
+// requested in opts.
+func (c *Collection) SearchWithOptions(ctx context.Context, query core.Vector, topK int, opts SearchOptions) ([]core.SearchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -174,12 +207,21 @@ func (c *Collection) Search(ctx context.Context, query core.Vector, topK int) ([
 	defer c.mu.RUnlock()
 
 	results := c.index.Search(query, topK)
-	for i, r := range results {
-		emb, meta, err := c.store.Get(r.Id)
-		if err != nil {
-			continue
+	if opts.IncludeVectors || opts.IncludeMetadata {
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.Id
 		}
-		results[i].Vector = core.Vector{Embeddings: emb, Metadata: meta}
+		stored, err := c.store.GetMany(ids, opts.IncludeVectors, opts.IncludeMetadata)
+		if err != nil {
+			return nil, err
+		}
+		for i, sv := range stored {
+			if sv.Id == "" {
+				continue
+			}
+			results[i].Vector = core.Vector{Embeddings: sv.Embeddings, Metadata: sv.Metadata}
+		}
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Distance < results[j].Distance
@@ -195,10 +237,11 @@ func (c *Collection) Train(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	// Only reading the store needs the collection lock. The index does its
+	// own locking, so training must not block searches and writes.
+	c.mu.RLock()
 	svecs, err := c.store.LoadEmbeddings()
+	c.mu.RUnlock()
 	if err != nil {
 		return err
 	}

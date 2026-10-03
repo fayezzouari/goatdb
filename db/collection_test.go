@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/fayezzouari/goatdb/core"
@@ -127,5 +129,100 @@ func TestCollectionPersistence(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].Id != "x" {
 		t.Errorf("expected 'x' after reload, got %v", results)
+	}
+}
+
+// TestCollectionTrainConcurrent runs Train alongside writes and searches on
+// an HNSW collection; run it with -race.
+func TestCollectionTrainConcurrent(t *testing.T) {
+	const dim = 8
+	idx := index.NewHNSWIndex(dim, 8, 32, 16, core.Euclidean)
+	col, err := newCollection("train", dim, core.Euclidean, "hnsw", t.TempDir(), idx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { col.Close() })
+
+	vec := func(i int) core.Vector {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = float32((i*7+j*13)%101) / 101
+		}
+		return core.Vector{Embeddings: emb}
+	}
+	for i := 0; i < 50; i++ {
+		if err := col.AddVector(ctx, fmt.Sprintf("seed%d", i), vec(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 3; i++ {
+			if err := col.Train(ctx); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 30; i++ {
+			if err := col.AddVector(ctx, fmt.Sprintf("w%d", i), vec(1000+i)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := col.Search(ctx, vec(i), 5); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+func TestCollectionSearchWithOptions(t *testing.T) {
+	col := newTestCollection(t)
+	col.AddVector(ctx, "a", core.Vector{Embeddings: []float32{1, 0}, Metadata: map[string]any{"tag": "a"}})
+	col.AddVector(ctx, "b", core.Vector{Embeddings: []float32{0, 1}, Metadata: map[string]any{"tag": "b"}})
+	q := core.Vector{Embeddings: []float32{1, 0}}
+
+	cases := []struct {
+		name     string
+		opts     SearchOptions
+		wantEmb  bool
+		wantMeta bool
+	}{
+		{"none", SearchOptions{}, false, false},
+		{"metadata", SearchOptions{IncludeMetadata: true}, false, true},
+		{"vectors", SearchOptions{IncludeVectors: true}, true, false},
+		{"both", SearchOptions{IncludeVectors: true, IncludeMetadata: true}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results, err := col.SearchWithOptions(ctx, q, 2, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 2 || results[0].Id != "a" {
+				t.Fatalf("expected 'a' first of 2, got %v", results)
+			}
+			if got := results[0].Vector.Embeddings != nil; got != tc.wantEmb {
+				t.Errorf("embeddings present = %v, want %v", got, tc.wantEmb)
+			}
+			if got := results[0].Vector.Metadata != nil; got != tc.wantMeta {
+				t.Errorf("metadata present = %v, want %v", got, tc.wantMeta)
+			}
+			if tc.wantMeta && results[0].Vector.Metadata["tag"] != "a" {
+				t.Errorf("wrong metadata: %v", results[0].Vector.Metadata)
+			}
+		})
 	}
 }

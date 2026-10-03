@@ -328,3 +328,50 @@ func TestSearchSortedByDistance(t *testing.T) {
 		t.Errorf("expected nearest first, got %v then %v", results[0]["id"], results[1]["id"])
 	}
 }
+
+func TestSearchIncludeOptions(t *testing.T) {
+	h, close := setup(t)
+	defer close()
+	createTestCollection(t, h, "vecs")
+
+	post(t, h, "/collections/vecs/vectors", map[string]any{
+		"id": "a", "embeddings": []float32{1, 0}, "metadata": map[string]any{"label": "a"},
+	})
+
+	search := func(body map[string]any) map[string]any {
+		t.Helper()
+		body["embeddings"] = []float32{1, 0}
+		w := post(t, h, "/collections/vecs/search", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+		}
+		var resp map[string][]map[string]any
+		json.NewDecoder(w.Body).Decode(&resp)
+		if len(resp["results"]) != 1 {
+			t.Fatalf("expected 1 result, got %v", resp["results"])
+		}
+		return resp["results"][0]
+	}
+
+	// Defaults: metadata on, embeddings off.
+	r := search(map[string]any{})
+	if _, ok := r["embeddings"]; ok {
+		t.Errorf("embeddings should be omitted by default, got %v", r)
+	}
+	if m, _ := r["metadata"].(map[string]any); m["label"] != "a" {
+		t.Errorf("metadata should be included by default, got %v", r)
+	}
+
+	r = search(map[string]any{"include_vectors": true})
+	if emb, _ := r["embeddings"].([]any); len(emb) != 2 {
+		t.Errorf("expected embeddings with include_vectors, got %v", r)
+	}
+
+	r = search(map[string]any{"include_metadata": false})
+	if _, ok := r["metadata"]; ok {
+		t.Errorf("metadata should be omitted with include_metadata=false, got %v", r)
+	}
+	if r["id"] != "a" {
+		t.Errorf("expected id 'a', got %v", r["id"])
+	}
+}

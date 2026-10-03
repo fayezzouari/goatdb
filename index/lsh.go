@@ -17,7 +17,7 @@ type lshTable struct {
 
 // LSHIndex is a multi-probe random-hyperplane LSH index.
 // Vectors are stored in a contiguous VectorPool; hash computation uses the
-// AVX2-accelerated dot product from core when available.
+// SIMD-accelerated dot product from core when available.
 type LSHIndex struct {
 	mu             sync.RWMutex
 	dim            int
@@ -28,6 +28,7 @@ type LSHIndex struct {
 	slotToID       map[int32]string
 	idToSlot       map[string]int32
 	distanceMetric core.DistanceMetric
+	metric         core.Metric
 	perturbMasks   []uint64
 }
 
@@ -68,17 +69,18 @@ func NewLSHIndex(dim, L, K int, metric core.DistanceMetric) *LSHIndex {
 		slotToID:       make(map[int32]string),
 		idToSlot:       make(map[string]int32),
 		distanceMetric: metric,
+		metric:         core.ResolveMetric(metric),
 		perturbMasks:   multiProbeMasks(K),
 	}
 }
 
 // hashVec computes the K-bit bucket key for vector v in table t.
 // Each bit is the sign of the dot product with the corresponding hyperplane.
-// Uses core.DistSlices (AVX2 dispatch) for each dot product.
+// Uses core.Dot (SIMD dispatch) for each dot product.
 func (l *LSHIndex) hashVec(t *lshTable, v []float32) uint64 {
 	var h uint64
 	for i, hp := range t.hyperplanes {
-		if core.DistSlices(v, hp, core.DotProduct) >= 0 {
+		if core.Dot(v, hp) >= 0 {
 			h |= 1 << uint(i)
 		}
 	}
@@ -90,10 +92,12 @@ func (l *LSHIndex) AddVector(id string, vector core.Vector) {
 	defer l.mu.Unlock()
 
 	slot := l.pool.Add(vector.Embeddings)
+	emb := l.pool.Get(slot)
+	l.metric.PrepareInPlace(emb)
 	l.idToSlot[id] = slot
 	l.slotToID[slot] = id
 	for i := range l.tables {
-		h := l.hashVec(&l.tables[i], vector.Embeddings)
+		h := l.hashVec(&l.tables[i], emb)
 		l.tables[i].buckets[h] = append(l.tables[i].buckets[h], slot)
 	}
 }
@@ -153,7 +157,7 @@ func (l *LSHIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	}
 	seen := make(map[int32]bool)
 	candidates := make([]int32, 0, maxCands)
-	q := query.Embeddings
+	q := l.metric.Prepare(query.Embeddings)
 
 outer:
 	for i := range l.tables {
@@ -180,11 +184,11 @@ outer:
 		}
 	}
 
+	distFn := l.metric.Dist
 	rh := &resultHeap{}
 	heap.Init(rh)
 	for _, slot := range candidates {
-		emb := l.pool.Get(slot)
-		dist := core.DistSlices(q, emb, l.distanceMetric)
+		dist := distFn(q, l.pool.Get(slot))
 		result := core.SearchResult{Id: l.slotToID[slot], Distance: dist}
 		if rh.Len() < topK {
 			heap.Push(rh, result)
@@ -192,6 +196,9 @@ outer:
 			heap.Pop(rh)
 			heap.Push(rh, result)
 		}
+	}
+	for i := range *rh {
+		(*rh)[i].Distance = l.metric.Finalize((*rh)[i].Distance)
 	}
 	return []core.SearchResult(*rh)
 }
@@ -206,6 +213,7 @@ type lshState struct {
 	Hyperplanes    [][][]float32
 	Buckets        []map[uint64][]int32
 	Vectors        map[string][]float32
+	Normalized     bool
 }
 
 func (l *LSHIndex) Save(path string) error {
@@ -238,6 +246,7 @@ func (l *LSHIndex) Save(path string) error {
 		Hyperplanes:    hps,
 		Buckets:        buckets,
 		Vectors:        vecs,
+		Normalized:     l.metric.Normalizes(),
 	})
 }
 
@@ -259,20 +268,30 @@ func (l *LSHIndex) Load(path string) error {
 	l.L = s.L
 	l.K = s.K
 	l.distanceMetric = s.DistanceMetric
+	l.metric = core.ResolveMetric(s.DistanceMetric)
 	l.perturbMasks = multiProbeMasks(s.K)
 
+	l.tables = make([]lshTable, s.L)
+	for i := range l.tables {
+		l.tables[i] = lshTable{hyperplanes: s.Hyperplanes[i], buckets: make(map[uint64][]int32)}
+	}
+
+	// Slots are reassigned on load, so saved buckets are rebuilt by rehashing.
 	l.pool = core.NewVectorPool(s.Dim, max(len(s.Vectors), 64))
 	l.idToSlot = make(map[string]int32, len(s.Vectors))
 	l.slotToID = make(map[int32]string, len(s.Vectors))
 	for id, emb := range s.Vectors {
 		slot := l.pool.Add(emb)
+		v := l.pool.Get(slot)
+		if !s.Normalized {
+			l.metric.PrepareInPlace(v)
+		}
 		l.idToSlot[id] = slot
 		l.slotToID[slot] = id
-	}
-
-	l.tables = make([]lshTable, s.L)
-	for i := range l.tables {
-		l.tables[i] = lshTable{hyperplanes: s.Hyperplanes[i], buckets: s.Buckets[i]}
+		for i := range l.tables {
+			h := l.hashVec(&l.tables[i], v)
+			l.tables[i].buckets[h] = append(l.tables[i].buckets[h], slot)
+		}
 	}
 	return nil
 }

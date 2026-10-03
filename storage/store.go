@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ type StoredVector struct {
 	Embeddings []float32
 	Metadata   map[string]any
 }
+
+const walCheckpointSize = 64 << 20
 
 type Store struct {
 	vectors *VectorStore
@@ -46,67 +49,130 @@ func Open(dir string, dim int) (*Store, error) {
 		return nil, err
 	}
 
-	if err := wal.Truncate(); err != nil {
+	if err := s.checkpoint(); err != nil {
 		return nil, err
 	}
 
 	return s, nil
 }
 
+// replay re-applies vector file writes from the WAL. MetaStore commits are
+// atomic and durable, so it is the source of truth for which id owns which
+// slot; WAL entries only re-apply embeddings and delete flags that may not
+// have reached vectors.bin. Entries that never committed to MetaStore are
+// skipped, which makes replay idempotent.
 func (s *Store) replay(entries []walEntry) error {
 	for _, e := range entries {
+		slot, err := s.meta.GetSlot(e.id)
+		owned := err == nil && slot == e.slot
 		switch e.op {
-		case opInsert:
-			if _, err := s.meta.GetSlot(e.id); err == nil {
-				continue
-			}
-			if err := s.vectors.Write(int(e.slot), e.embeddings); err != nil {
-				return err
-			}
-			if err := s.meta.PutSlot(e.id, e.slot); err != nil {
-				return err
-			}
-		case opUpdate:
-			if _, err := s.meta.GetSlot(e.id); err != nil {
+		case opInsert, opUpdate:
+			if !owned {
 				continue
 			}
 			if err := s.vectors.Write(int(e.slot), e.embeddings); err != nil {
 				return err
 			}
 		case opDelete:
+			if owned {
+				continue
+			}
 			s.vectors.Delete(int(e.slot))
-			s.meta.Delete(e.id)
 		}
 	}
 	return nil
 }
 
+// checkpoint flushes the vector file and truncates the WAL.
+func (s *Store) checkpoint() error {
+	if err := s.vectors.Flush(); err != nil {
+		return err
+	}
+	return s.wal.Truncate()
+}
+
+func (s *Store) maybeCheckpoint() error {
+	if s.wal.Size() < walCheckpointSize {
+		return nil
+	}
+	return s.checkpoint()
+}
+
+func (s *Store) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkpoint()
+}
+
 func (s *Store) Add(id string, embeddings []float32, metadata map[string]any) error {
+	return s.AddBatch([]StoredVector{{Id: id, Embeddings: embeddings, Metadata: metadata}})
+}
+
+// AddBatch inserts vectors with one WAL write, one fsync and one metadata
+// transaction. The batch is rejected as a whole if any id is repeated or
+// already stored.
+func (s *Store) AddBatch(vectors []StoredVector) error {
+	if len(vectors) == 0 {
+		return nil
+	}
+	ids := make([]string, len(vectors))
+	metas := make([][]byte, len(vectors))
+	seen := make(map[string]struct{}, len(vectors))
+	for i, v := range vectors {
+		if _, dup := seen[v.Id]; dup {
+			return fmt.Errorf("vector %q: %w", v.Id, ErrDuplicateID)
+		}
+		seen[v.Id] = struct{}{}
+		if len(v.Embeddings) != s.vectors.dim {
+			return fmt.Errorf("vector %q: expected %d dimensions, got %d", v.Id, s.vectors.dim, len(v.Embeddings))
+		}
+		ids[i] = v.Id
+		m, err := encodeMeta(v.Metadata)
+		if err != nil {
+			return err
+		}
+		metas[i] = m
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	slot, err := s.meta.AllocSlot(id)
+	if err := s.maybeCheckpoint(); err != nil {
+		return err
+	}
+
+	slots, err := s.meta.Insert(ids, metas, func(slots []uint32) error {
+		entries := make([]walEntry, len(vectors))
+		for i, v := range vectors {
+			entries[i] = walEntry{op: opInsert, id: v.Id, slot: slots[i], embeddings: v.Embeddings}
+		}
+		if err := s.wal.AppendBatch(entries); err != nil {
+			return err
+		}
+		return s.wal.Sync()
+	})
 	if err != nil {
 		return err
 	}
 
-	if err := s.wal.Append(opInsert, id, slot, embeddings); err != nil {
-		return err
+	for i, v := range vectors {
+		if err := s.vectors.Write(int(slots[i]), v.Embeddings); err != nil {
+			return err
+		}
 	}
-	if err := s.wal.Sync(); err != nil {
-		return err
-	}
-
-	if err := s.vectors.Write(int(slot), embeddings); err != nil {
-		return err
-	}
-
-	return s.meta.PutMeta(id, metadata)
+	return nil
 }
 
 func (s *Store) Update(id string, embeddings []float32, metadata map[string]any) error {
+	if len(embeddings) != s.vectors.dim {
+		return fmt.Errorf("vector %q: expected %d dimensions, got %d", id, s.vectors.dim, len(embeddings))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.maybeCheckpoint(); err != nil {
+		return err
+	}
 
 	slot, err := s.meta.GetSlot(id)
 	if err != nil {
@@ -153,6 +219,10 @@ func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.maybeCheckpoint(); err != nil {
+		return err
+	}
+
 	slot, err := s.meta.GetSlot(id)
 	if err != nil {
 		return fmt.Errorf("vector %q not found", id)
@@ -165,8 +235,11 @@ func (s *Store) Delete(id string) error {
 		return err
 	}
 
+	if err := s.meta.Delete(id); err != nil {
+		return err
+	}
 	s.vectors.Delete(int(slot))
-	return s.meta.Delete(id)
+	return nil
 }
 
 func (s *Store) LoadAll() ([]StoredVector, error) {
@@ -214,7 +287,48 @@ func (s *Store) LoadEmbeddings() ([]StoredVector, error) {
 }
 
 func (s *Store) Close() error {
-	s.wal.Close()
-	s.vectors.Close()
-	return s.meta.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var errs []error
+	if err := s.vectors.Flush(); err != nil {
+		errs = append(errs, err)
+	} else if err := s.wal.Truncate(); err != nil {
+		errs = append(errs, err)
+	}
+	errs = append(errs, s.wal.Close(), s.vectors.Close(), s.meta.Close())
+	return errors.Join(errs...)
+}
+
+// GetMany hydrates several vectors at once. Slots and metadata are resolved in
+// a single metadata read transaction, and embeddings are decoded from the
+// vector file only when withEmb is set. The result is aligned with ids; ids
+// that are missing or deleted come back with an empty Id.
+func (s *Store) GetMany(ids []string, withEmb, withMeta bool) ([]StoredVector, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := s.meta.GetSlotsAndMeta(ids, withMeta)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]StoredVector, len(ids))
+	for i, e := range entries {
+		if !e.Found {
+			continue
+		}
+		if withEmb {
+			emb, ok := s.vectors.Read(int(e.Slot))
+			if !ok {
+				continue
+			}
+			out[i].Embeddings = emb
+		} else if !s.vectors.Live(int(e.Slot)) {
+			continue
+		}
+		out[i].Id = ids[i]
+		out[i].Metadata = e.Metadata
+	}
+	return out, nil
 }

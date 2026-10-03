@@ -21,7 +21,8 @@ type ivfList struct {
 
 // IVFIndex is an Inverted File index backed by a contiguous VectorPool.
 // Centroids are stored flat ([nClusters * dim]) for cache-friendly scanning.
-// All distance computations dispatch to AVX2 via core.DistSlices.
+// Cosine collections store L2-normalized vectors, so k-means and probing run
+// on the unit sphere.
 type IVFIndex struct {
 	mu             sync.RWMutex
 	dim            int
@@ -32,6 +33,7 @@ type IVFIndex struct {
 	idToCluster    map[string]int // O(1) lookup for delete/get
 	pool           *core.VectorPool
 	distanceMetric core.DistanceMetric
+	metric         core.Metric
 	trained        bool
 }
 
@@ -44,10 +46,11 @@ func NewIVFIndex(dim, nClusters, nProbe int, metric core.DistanceMetric) *IVFInd
 		idToCluster:    make(map[string]int),
 		pool:           core.NewVectorPool(dim, 64),
 		distanceMetric: metric,
+		metric:         core.ResolveMetric(metric),
 	}
 }
 
-// l2sq returns the squared euclidean distance, dispatching to AVX2 when available.
+// l2sq returns the squared euclidean distance, using SIMD when available.
 // Used for k-means centroid assignment (metric-agnostic, no sqrt needed).
 func l2sq(a, b []float32) float32 { return core.L2SqSlices(a, b) }
 
@@ -128,6 +131,7 @@ func (idx *IVFIndex) Train(vectors []core.Vector) {
 			train[i] = vectors[p]
 		}
 	}
+	train = prepareVectors(idx.metric, train, 0)
 
 	idx.centroids = kmeansppInit(train, idx.nClusters)
 
@@ -203,9 +207,11 @@ func (idx *IVFIndex) AddVector(id string, vector core.Vector) {
 	defer idx.mu.Unlock()
 
 	slot := idx.pool.Add(vector.Embeddings)
+	emb := idx.pool.Get(slot)
+	idx.metric.PrepareInPlace(emb)
 	c := 0
 	if idx.trained {
-		c = idx.nearestCentroid(vector.Embeddings)
+		c = idx.nearestCentroid(emb)
 	}
 	idx.lists[c].slots = append(idx.lists[c].slots, slot)
 	idx.lists[c].ids = append(idx.lists[c].ids, id)
@@ -314,15 +320,16 @@ func (idx *IVFIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	clusterIdxs := idx.topNCentroids(query.Embeddings)
+	q := idx.metric.Prepare(query.Embeddings)
+	clusterIdxs := idx.topNCentroids(q)
 
+	distFn := idx.metric.Dist
 	rh := &resultHeap{}
 	heap.Init(rh)
 	for _, c := range clusterIdxs {
 		list := &idx.lists[c]
 		for i, slot := range list.slots {
-			emb := idx.pool.Get(slot)
-			dist := core.DistSlices(query.Embeddings, emb, idx.distanceMetric)
+			dist := distFn(q, idx.pool.Get(slot))
 			result := core.SearchResult{Id: list.ids[i], Distance: dist}
 			if rh.Len() < topK {
 				heap.Push(rh, result)
@@ -331,6 +338,9 @@ func (idx *IVFIndex) Search(query core.Vector, topK int) []core.SearchResult {
 				heap.Push(rh, result)
 			}
 		}
+	}
+	for i := range *rh {
+		(*rh)[i].Distance = idx.metric.Finalize((*rh)[i].Distance)
 	}
 	return []core.SearchResult(*rh)
 }
@@ -350,6 +360,7 @@ type ivfState struct {
 	Centroids      []float32
 	Trained        bool
 	Lists          []ivfListState
+	Normalized     bool
 }
 
 func (idx *IVFIndex) Save(path string) error {
@@ -380,6 +391,7 @@ func (idx *IVFIndex) Save(path string) error {
 		Centroids:      idx.centroids,
 		Trained:        idx.trained,
 		Lists:          lists,
+		Normalized:     idx.metric.Normalizes(),
 	})
 }
 
@@ -401,8 +413,15 @@ func (idx *IVFIndex) Load(path string) error {
 	idx.nClusters = s.NClusters
 	idx.nProbe = s.NProbe
 	idx.distanceMetric = s.DistanceMetric
+	idx.metric = core.ResolveMetric(s.DistanceMetric)
 	idx.centroids = s.Centroids
 	idx.trained = s.Trained
+	if !s.Normalized && idx.metric.Normalizes() {
+		// Older files hold raw vectors and centroids; move them onto the unit sphere.
+		for c := 0; c < len(idx.centroids)/idx.dim; c++ {
+			core.Normalize(idx.centroid(c))
+		}
+	}
 
 	total := 0
 	for _, l := range s.Lists {
@@ -417,6 +436,9 @@ func (idx *IVFIndex) Load(path string) error {
 		idx.lists[c].ids = make([]string, len(ls.IDs))
 		for i, id := range ls.IDs {
 			slot := idx.pool.Add(ls.Embeddings[i])
+			if !s.Normalized {
+				idx.metric.PrepareInPlace(idx.pool.Get(slot))
+			}
 			idx.lists[c].slots[i] = slot
 			idx.lists[c].ids[i] = id
 			idx.idToCluster[id] = c

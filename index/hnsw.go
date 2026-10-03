@@ -1,12 +1,12 @@
 package index
 
 import (
-	"container/heap"
+	"cmp"
 	"encoding/gob"
 	"math"
 	"math/rand"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/fayezzouari/goatdb/core"
@@ -17,21 +17,116 @@ type candidate struct {
 	dist float32
 }
 
-type minHeap []candidate
+// candMinHeap and candMaxHeap are typed binary heaps over []candidate.
+// They avoid container/heap, whose Push(any)/Pop() any box every candidate
+// into an interface and allocate on each call.
+type candMinHeap []candidate
 
-func (h minHeap) Len() int           { return len(h) }
-func (h minHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
-func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *minHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
-func (h *minHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h *candMinHeap) push(c candidate) {
+	*h = append(*h, c)
+	a := *h
+	i := len(a) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if a[p].dist <= a[i].dist {
+			break
+		}
+		a[p], a[i] = a[i], a[p]
+		i = p
+	}
+}
 
-type maxHeap []candidate
+func (h *candMinHeap) pop() candidate {
+	a := *h
+	top := a[0]
+	n := len(a) - 1
+	a[0] = a[n]
+	a = a[:n]
+	i := 0
+	for {
+		l := 2*i + 1
+		if l >= n {
+			break
+		}
+		m := l
+		if r := l + 1; r < n && a[r].dist < a[l].dist {
+			m = r
+		}
+		if a[i].dist <= a[m].dist {
+			break
+		}
+		a[i], a[m] = a[m], a[i]
+		i = m
+	}
+	*h = a
+	return top
+}
 
-func (h maxHeap) Len() int           { return len(h) }
-func (h maxHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
-func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *maxHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
-func (h *maxHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+type candMaxHeap []candidate
+
+func (h *candMaxHeap) push(c candidate) {
+	*h = append(*h, c)
+	a := *h
+	i := len(a) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if a[p].dist >= a[i].dist {
+			break
+		}
+		a[p], a[i] = a[i], a[p]
+		i = p
+	}
+}
+
+func (h *candMaxHeap) pop() candidate {
+	a := *h
+	top := a[0]
+	n := len(a) - 1
+	a[0] = a[n]
+	a = a[:n]
+	i := 0
+	for {
+		l := 2*i + 1
+		if l >= n {
+			break
+		}
+		m := l
+		if r := l + 1; r < n && a[r].dist > a[l].dist {
+			m = r
+		}
+		if a[i].dist >= a[m].dist {
+			break
+		}
+		a[i], a[m] = a[m], a[i]
+		i = m
+	}
+	*h = a
+	return top
+}
+
+// searchScratch holds the per-operation buffers used by searchLayer. One
+// scratch is taken from HNSWIndex.scratchPool for a whole Search or AddVector
+// call, so concurrent searches under the read lock never share one.
+type searchScratch struct {
+	// visited is indexed by pool slot. Only the entries listed in dirty are
+	// non-zero, and they are reset before searchLayer returns.
+	visited []byte
+	dirty   []int32
+	cands   candMinHeap
+	W       candMaxHeap
+	// result is the buffer searchLayer returns. It is overwritten by the
+	// next searchLayer call on the same scratch.
+	result []candidate
+	ep     []candidate
+	// Buffers for neighbor selection in AddVector. selected holds the new
+	// node's neighbors while prune* are used to shrink a neighbor's
+	// overflowing connection list, so they must not share memory.
+	selected    []candidate
+	discarded   []candidate
+	pruneCands  []candidate
+	pruneSel    []candidate
+	pruneDiscrd []candidate
+}
 
 type hnswNode struct {
 	id          string
@@ -46,20 +141,30 @@ type HNSWIndex struct {
 	efConstruction int
 	ef             int
 	mL             float64
+	// keepPruned (keepPrunedConnections in the paper) fills a node's
+	// remaining connection slots with candidates the neighbor heuristic
+	// discarded, so sparse regions keep their full degree.
+	keepPruned     bool
 	nodes          map[string]*hnswNode
 	slotToNode     []*hnswNode
 	entrySlot      int32
 	maxLayer       int
 	distanceMetric core.DistanceMetric
+	metric         core.Metric
 	pool           *core.VectorPool
 	codebook       *core.SQCodebook
 	sqPool         *core.Int8VectorPool
-	pqCodebook     *core.PQCodebook
-	pqPool         *core.PQPool
-	// visitedPool reuses []byte visited arrays across searchLayer calls.
-	// Flat array lookup is O(1) at ~2ns vs map at ~50ns — at efConstruction=200
-	// and M=24 this saves ~690µs per AddVector, 11+ minutes at 1M.
-	visitedPool sync.Pool
+	// trainMu serializes Train calls.
+	trainMu sync.Mutex
+	// training is set while Train quantizes vectors outside mu. AddVector
+	// then records the slots it writes in trainDirty, and Train re-quantizes
+	// them with the new codebook when it swaps the codebook in.
+	training   bool
+	trainDirty []int32
+	// scratchPool reuses searchScratch buffers (visited array, heaps, result)
+	// across Search and AddVector calls. Flat array lookup is O(1) at ~2ns vs
+	// map at ~50ns, and reusing the heaps removes per-push allocations.
+	scratchPool sync.Pool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
@@ -69,53 +174,89 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		efConstruction: efConstruction,
 		ef:             ef,
 		mL:             1.0 / math.Log(float64(M)),
+		keepPruned:     true,
 		nodes:          make(map[string]*hnswNode),
 		maxLayer:       -1,
 		distanceMetric: metric,
+		metric:         core.ResolveMetric(metric),
 		pool:           core.NewVectorPool(dim, 64),
 	}
-	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
 	return h
 }
 
-func (h *HNSWIndex) Train(vectors []core.Vector) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// trainChunk is the number of vectors Train quantizes per read-lock hold.
+const trainChunk = 4096
 
+// testHookTrainChunk, when set by tests, runs after each chunk Train
+// quantizes, while no index lock is held.
+var testHookTrainChunk func()
+
+// Train builds a scalar quantization codebook from vectors and quantizes
+// every indexed vector with it. The codebook is built without any index
+// lock, and vectors are quantized in chunks under the read lock, so
+// searches keep running and inserts are only delayed by one chunk. The
+// write lock is held only to swap the new codebook in.
+func (h *HNSWIndex) Train(vectors []core.Vector) {
+	h.trainMu.Lock()
+	defer h.trainMu.Unlock()
+
+	vectors = prepareVectors(h.metric, vectors, hnswMaxTrainVecs)
 	cb := core.NewSQCodebook(vectors)
 	if cb == nil {
 		return
 	}
-	h.codebook = cb
-	h.sqPool = core.NewInt8VectorPool(h.dim, max(h.pool.Slots(), 64))
-	for _, node := range h.nodes {
-		h.sqPool.Set(node.poolIdx, cb.Quantize(h.pool.Get(node.poolIdx)))
+
+	h.mu.Lock()
+	h.training = true
+	h.trainDirty = h.trainDirty[:0]
+	n := h.pool.Slots()
+	dim := h.dim
+	h.mu.Unlock()
+
+	sq := core.NewInt8VectorPool(dim, max(n, 64))
+	for start := 0; start < n; start += trainChunk {
+		end := min(start+trainChunk, n)
+		h.mu.RLock()
+		if !h.training {
+			// Load replaced the index while we were quantizing.
+			h.mu.RUnlock()
+			return
+		}
+		for slot := start; slot < end; slot++ {
+			sq.Set(int32(slot), cb.Quantize(h.pool.Get(int32(slot))))
+		}
+		h.mu.RUnlock()
+		if testHookTrainChunk != nil {
+			testHookTrainChunk()
+		}
 	}
 
-	nSubs := h.dim / 8
-	if nSubs < 1 {
-		nSubs = 1
-	}
-	for nSubs > 1 && h.dim%nSubs != 0 {
-		nSubs--
-	}
-	pq := core.NewPQCodebook(vectors, nSubs, 256)
-	if pq == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.training {
 		return
 	}
-	h.pqCodebook = pq
-	h.pqPool = core.NewPQPool(nSubs, max(h.pool.Slots(), 64))
-	for _, node := range h.nodes {
-		h.pqPool.Set(node.poolIdx, pq.Encode(h.pool.Get(node.poolIdx)))
+	// Slots written by AddVector after training started may hold vectors
+	// quantized from older data (or none at all); redo them.
+	sq.Grow(h.pool.Slots())
+	for _, slot := range h.trainDirty {
+		sq.Set(slot, cb.Quantize(h.pool.Get(slot)))
 	}
+	h.codebook = cb
+	h.sqPool = sq
+	h.training = false
+	h.trainDirty = nil
 }
+
+// hnswMaxTrainVecs caps the normalized copies made for codebook training.
+const hnswMaxTrainVecs = 100_000
 
 func (h *HNSWIndex) randomLevel() int {
 	return int(-math.Log(rand.Float64()) * h.mL)
 }
 
 func (h *HNSWIndex) dist(a, b []float32) float32 {
-	return core.DistSlices(a, b, h.distanceMetric)
+	return h.metric.Dist(a, b)
 }
 
 func (h *HNSWIndex) growSlotToNode(slot int32) {
@@ -131,32 +272,48 @@ func (h *HNSWIndex) slotDist(q []float32, qInt8 []int8, slot int32) float32 {
 	return h.dist(q, h.pool.Get(slot))
 }
 
-func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
+func (h *HNSWIndex) getScratch() *searchScratch {
+	if s, ok := h.scratchPool.Get().(*searchScratch); ok {
+		return s
+	}
+	return &searchScratch{}
+}
+
+func (h *HNSWIndex) putScratch(s *searchScratch) {
+	h.scratchPool.Put(s)
+}
+
+// searchLayer runs a greedy beam search on one layer and returns up to ef
+// candidates sorted by ascending distance.
+//
+// The returned slice is s.result: it stays valid only until the next
+// searchLayer call on the same scratch. eps may alias s.result, because the
+// entry points are copied into the heaps before s.result is rewritten.
+func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
 	nSlots := h.pool.Slots()
-	vbp := h.visitedPool.Get().(*[]byte)
-	vb := *vbp
+	vb := s.visited
 	if cap(vb) < nSlots {
 		vb = make([]byte, nSlots)
 	} else {
 		vb = vb[:nSlots]
 	}
-	dirty := make([]int32, 0, ef*4)
-
-	cands := &minHeap{}
-	W := &maxHeap{}
+	s.visited = vb
+	dirty := s.dirty[:0]
+	cands := s.cands[:0]
+	W := s.W[:0]
 
 	for _, ep := range eps {
-		heap.Push(cands, ep)
-		heap.Push(W, ep)
+		cands.push(ep)
+		W.push(ep)
 		if int(ep.slot) < len(vb) && vb[ep.slot] == 0 {
 			vb[ep.slot] = 1
 			dirty = append(dirty, ep.slot)
 		}
 	}
 
-	for cands.Len() > 0 {
-		c := heap.Pop(cands).(candidate)
-		if c.dist > (*W)[0].dist {
+	for len(cands) > 0 {
+		c := cands.pop()
+		if c.dist > W[0].dist {
 			break
 		}
 		node := h.slotToNode[c.slot]
@@ -172,53 +329,125 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candida
 				dirty = append(dirty, nbSlot)
 			}
 			d := h.slotDist(query, queryInt8, nbSlot)
-			if d < (*W)[0].dist || W.Len() < ef {
-				heap.Push(cands, candidate{nbSlot, d})
-				heap.Push(W, candidate{nbSlot, d})
-				if W.Len() > ef {
-					heap.Pop(W)
+			if d < W[0].dist || len(W) < ef {
+				cands.push(candidate{nbSlot, d})
+				W.push(candidate{nbSlot, d})
+				if len(W) > ef {
+					W.pop()
 				}
 			}
 		}
 	}
 
-	result := make([]candidate, W.Len())
-	for i := len(result) - 1; i >= 0; i-- {
-		result[i] = heap.Pop(W).(candidate)
+	n := len(W)
+	result := s.result[:0]
+	if cap(result) < n {
+		result = make([]candidate, n)
+	} else {
+		result = result[:n]
+	}
+	for i := n - 1; i >= 0; i-- {
+		result[i] = W.pop()
 	}
 
-	for _, s := range dirty {
-		if int(s) < len(vb) {
-			vb[s] = 0
+	for _, slot := range dirty {
+		if int(slot) < len(vb) {
+			vb[slot] = 0
 		}
 	}
-	*vbp = vb
-	h.visitedPool.Put(vbp)
-
+	s.dirty = dirty[:0]
+	s.cands = cands[:0]
+	s.W = W[:0]
+	s.result = result
 	return result
 }
 
-func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int) []candidate {
-	if len(candidates) <= M {
-		return candidates
-	}
-	return candidates[:M]
+// sortCandidates sorts by ascending distance without the reflection and
+// closure allocations of sort.Slice.
+func sortCandidates(c []candidate) {
+	slices.SortFunc(c, func(a, b candidate) int { return cmp.Compare(a.dist, b.dist) })
 }
+
+// selectNeighbors picks up to M neighbors from candidates (sorted by
+// ascending distance to the base node) with the heuristic of Malkov &
+// Yashunin, Algorithm 4: a candidate is kept only if it is closer to the base
+// node than to every neighbor selected so far. This spreads links across
+// clusters instead of pointing them all into the nearest dense one. With
+// keepPruned, discarded candidates fill any remaining slots in
+// distance order.
+//
+// sel and discarded are reusable buffers; the selection is returned in sel's
+// backing array and must not alias candidates.
+func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int, sel, discarded []candidate) (selOut, discardedOut []candidate) {
+	sel = sel[:0]
+	discarded = discarded[:0]
+	if h.keepPruned && len(candidates) <= M {
+		return append(sel, candidates...), discarded
+	}
+	for _, c := range candidates {
+		if len(sel) >= M {
+			break
+		}
+		cVec := h.pool.Get(c.slot)
+		good := true
+		for _, r := range sel {
+			if h.dist(cVec, h.pool.Get(r.slot)) < c.dist {
+				good = false
+				break
+			}
+		}
+		if good {
+			sel = append(sel, c)
+		} else {
+			discarded = append(discarded, c)
+		}
+	}
+	if h.keepPruned {
+		for _, c := range discarded {
+			if len(sel) >= M {
+				break
+			}
+			sel = append(sel, c)
+		}
+	}
+	return sel, discarded
+}
+
+// pruneConnections shrinks the connection list of the node at slot on layer
+// to at most mMax entries using the same heuristic as selectNeighbors.
+func (h *HNSWIndex) pruneConnections(s *searchScratch, slot int32, layer, mMax int) {
+	node := h.slotToNode[slot]
+	conns := node.connections[layer]
+	vec := h.pool.Get(slot)
+	cands := s.pruneCands[:0]
+	for _, c := range conns {
+		cands = append(cands, candidate{c, h.dist(vec, h.pool.Get(c))})
+	}
+	sortCandidates(cands)
+	sel, disc := h.selectNeighbors(cands, mMax, s.pruneSel, s.pruneDiscrd)
+	conns = conns[:0]
+	for _, c := range sel {
+		conns = append(conns, c.slot)
+	}
+	node.connections[layer] = conns
+	s.pruneCands, s.pruneSel, s.pruneDiscrd = cands, sel, disc
+}
+
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
-	q := vector.Embeddings
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	poolIdx := h.pool.Add(q)
+	poolIdx := h.pool.Add(vector.Embeddings)
+	q := h.pool.Get(poolIdx)
+	h.metric.PrepareInPlace(q)
 	if h.codebook != nil {
 		h.sqPool.Grow(int(poolIdx) + 1)
 		h.sqPool.Set(poolIdx, h.codebook.Quantize(q))
 	}
-	if h.pqCodebook != nil {
-		h.pqPool.Grow(int(poolIdx) + 1)
-		h.pqPool.Set(poolIdx, h.pqCodebook.Encode(q))
+	if h.training {
+		h.trainDirty = append(h.trainDirty, poolIdx)
 	}
 	node := &hnswNode{
 		id:          id,
@@ -243,10 +472,14 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
+	s := h.getScratch()
+	defer h.putScratch(s)
+
+	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	s.ep = ep
 
 	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
@@ -255,40 +488,32 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(q, qInt8, ep, h.efConstruction, layer)
+		// candidates aliases s.result; it is fully consumed (and reused as
+		// the next layer's entry points) before searchLayer runs again.
+		candidates := h.searchLayer(s, q, qInt8, ep, h.efConstruction, layer)
 		if qInt8 != nil {
 			for i := range candidates {
 				candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
 			}
-			sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+			sortCandidates(candidates)
 		}
-		neighbors := h.selectNeighbors(candidates, mMax)
-		node.connections[layer] = make([]int32, len(neighbors))
+		// As in the paper (Algorithm 1), the new node links to M neighbors
+		// on every layer; back-links can grow its list up to mMax.
+		neighbors, disc := h.selectNeighbors(candidates, h.M, s.selected, s.discarded)
+		s.selected, s.discarded = neighbors, disc
+		conns := make([]int32, len(neighbors), mMax+1)
 		for i, nb := range neighbors {
-			node.connections[layer][i] = nb.slot
+			conns[i] = nb.slot
 		}
+		node.connections[layer] = conns
 		for _, nb := range neighbors {
 			nbNode := h.slotToNode[nb.slot]
 			if layer >= len(nbNode.connections) {
 				continue
 			}
-			conns := nbNode.connections[layer]
-			if len(conns) < mMax {
-				nbNode.connections[layer] = append(conns, poolIdx)
-				continue
-			}
-
-			nbVec := h.pool.Get(nb.slot)
-			newDist := h.dist(nbVec, h.pool.Get(poolIdx))
-			worstIdx, worstDist := -1, float32(-1)
-			for ci, connSlot := range conns {
-				d := h.dist(nbVec, h.pool.Get(connSlot))
-				if d > worstDist {
-					worstDist, worstIdx = d, ci
-				}
-			}
-			if worstIdx >= 0 && newDist < worstDist {
-				nbNode.connections[layer][worstIdx] = poolIdx
+			nbNode.connections[layer] = append(nbNode.connections[layer], poolIdx)
+			if len(nbNode.connections[layer]) > mMax {
+				h.pruneConnections(s, nb.slot, layer, mMax)
 			}
 		}
 		ep = candidates
@@ -359,33 +584,37 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 		return nil
 	}
 
-	q := query.Embeddings
+	q := h.metric.Prepare(query.Embeddings)
 	var qInt8 []int8
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
+	s := h.getScratch()
+	defer h.putScratch(s)
+
+	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	s.ep = ep
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(q, qInt8, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(s, q, qInt8, ep, max(h.ef, topK), 0)
 
 	if qInt8 != nil {
 		for i := range candidates {
 			candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
 		}
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+		sortCandidates(candidates)
 	}
 
 	results := make([]core.SearchResult, 0, topK)
 	for i := 0; i < topK && i < len(candidates); i++ {
 		results = append(results, core.SearchResult{
 			Id:       h.slotToNode[candidates[i].slot].id,
-			Distance: candidates[i].dist,
+			Distance: h.metric.Finalize(candidates[i].dist),
 		})
 	}
 	return results
@@ -398,6 +627,9 @@ type hnswNodeState struct {
 	Connections [][]string
 }
 
+// hnswState is the on-disk format. The PQ fields are kept so that files
+// written by older versions still decode; they are no longer written and are
+// ignored on Load.
 type hnswState struct {
 	Dim            int
 	M              int
@@ -415,6 +647,7 @@ type hnswState struct {
 	PQNCentroids   int
 	PQCentroids    []float32
 	HasPQ          bool
+	Normalized     bool
 }
 
 func (h *HNSWIndex) Save(path string) error {
@@ -457,17 +690,12 @@ func (h *HNSWIndex) Save(path string) error {
 		EntryPoint:     entryID,
 		MaxLayer:       h.maxLayer,
 		Nodes:          nodes,
+		Normalized:     h.metric.Normalizes(),
 	}
 	if h.codebook != nil {
 		state.HasSQ = true
 		state.SQMin = h.codebook.Min
 		state.SQScale = h.codebook.Scale
-	}
-	if h.pqCodebook != nil {
-		state.HasPQ = true
-		state.PQNSubs = h.pqCodebook.NSubs
-		state.PQNCentroids = h.pqCodebook.NCentroids
-		state.PQCentroids = h.pqCodebook.Centroids
 	}
 	return gob.NewEncoder(file).Encode(state)
 }
@@ -491,6 +719,7 @@ func (h *HNSWIndex) Load(path string) error {
 	h.ef = s.Ef
 	h.mL = s.ML
 	h.distanceMetric = s.DistanceMetric
+	h.metric = core.ResolveMetric(s.DistanceMetric)
 	h.maxLayer = s.MaxLayer
 	h.pool = core.NewVectorPool(s.Dim, len(s.Nodes))
 	h.nodes = make(map[string]*hnswNode, len(s.Nodes))
@@ -498,6 +727,9 @@ func (h *HNSWIndex) Load(path string) error {
 
 	for id, ns := range s.Nodes {
 		poolIdx := h.pool.Add(ns.Embeddings)
+		if !s.Normalized {
+			h.metric.PrepareInPlace(h.pool.Get(poolIdx))
+		}
 		node := &hnswNode{id: id, poolIdx: poolIdx}
 		h.nodes[id] = node
 		h.growSlotToNode(poolIdx)
@@ -521,24 +753,27 @@ func (h *HNSWIndex) Load(path string) error {
 		h.entrySlot = ep.poolIdx
 	}
 
+	// Abandon any Train in progress: its slots refer to the old pool.
+	h.training = false
+	h.trainDirty = nil
+	h.codebook = nil
+	h.sqPool = nil
 	if s.HasSQ {
 		h.codebook = &core.SQCodebook{Min: s.SQMin, Scale: s.SQScale, Dim: s.Dim}
+		if !s.Normalized && h.metric.Normalizes() {
+			// Older files trained SQ on raw vectors; retrain on the normalized ones.
+			vecs := make([]core.Vector, 0, len(h.nodes))
+			for _, node := range h.nodes {
+				vecs = append(vecs, core.Vector{Embeddings: h.pool.Get(node.poolIdx)})
+			}
+			if cb := core.NewSQCodebook(vecs); cb != nil {
+				h.codebook = cb
+			}
+		}
 		h.sqPool = core.NewInt8VectorPool(s.Dim, h.pool.Slots())
 		for _, node := range h.nodes {
 			h.sqPool.Set(node.poolIdx, h.codebook.Quantize(h.pool.Get(node.poolIdx)))
 		}
 	}
-	if s.HasPQ {
-		subDim := s.Dim / s.PQNSubs
-		h.pqCodebook = &core.PQCodebook{
-			NSubs: s.PQNSubs, NCentroids: s.PQNCentroids,
-			SubDim: subDim, Centroids: s.PQCentroids,
-		}
-		h.pqPool = core.NewPQPool(s.PQNSubs, h.pool.Slots())
-		for _, node := range h.nodes {
-			h.pqPool.Set(node.poolIdx, h.pqCodebook.Encode(h.pool.Get(node.poolIdx)))
-		}
-	}
-	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
 	return nil
 }
