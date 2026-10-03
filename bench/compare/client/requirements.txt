@@ -1,0 +1,12 @@
+# Pinned so the adapter code matches the client APIs it was written against.
+numpy==2.5.3
+h5py==3.16.0
+requests==2.34.2
+matplotlib==3.11.2
+qdrant-client==1.19.1
+weaviate-client==4.23.1
+# pymilvus 2.6.x matches the Milvus 2.6 server (pymilvus 3.x targets Milvus 3).
+pymilvus==2.6.17
+psycopg[binary]==3.3.6
+pgvector==0.5.0
+chromadb-client==1.5.9

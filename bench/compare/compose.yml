@@ -1,0 +1,193 @@
+# Vector DB comparison stack. Engines are behind profiles and are meant to be
+# run ONE AT A TIME (see run_all.sh). The client runs inside the same compose
+# network so no Docker Desktop port forwarding sits in the query path.
+#
+#   docker compose --profile qdrant up -d --wait
+#   docker compose run --rm client python run.py --engine qdrant --dataset sift-128-euclidean
+#   docker compose --profile qdrant down -v
+#
+# No host ports are published on purpose.
+
+name: vecbench
+
+# Identical resource envelope for every engine's main container.
+x-engine-limits: &engine-limits
+  cpus: "8"
+  mem_limit: 8g
+  memswap_limit: 8g  # no swap: an engine that does not fit in 8 GiB fails visibly
+
+services:
+  # ── goatdb (built from this repo) ───────────────────────────────────────────
+  goatdb:
+    profiles: [goatdb]
+    build: ../..
+    image: goatdb:bench
+    container_name: vb-goatdb
+    <<: *engine-limits
+    environment:
+      # Go < 1.25 does not derive GOMAXPROCS from the cgroup CPU quota.
+      GOMAXPROCS: "8"
+    volumes:
+      - goatdb_data:/data
+
+  # ── Qdrant ──────────────────────────────────────────────────────────────────
+  qdrant:
+    profiles: [qdrant]
+    image: qdrant/qdrant:v1.19.1
+    container_name: vb-qdrant
+    <<: *engine-limits
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ── Weaviate ────────────────────────────────────────────────────────────────
+  weaviate:
+    profiles: [weaviate]
+    image: semitechnologies/weaviate:1.39.8
+    container_name: vb-weaviate
+    <<: *engine-limits
+    command: ["--host", "0.0.0.0", "--port", "8080", "--scheme", "http"]
+    environment:
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: node1
+      DISABLE_TELEMETRY: "true"
+      ASYNC_INDEXING: "false"
+      GOMAXPROCS: "8"
+      GOMEMLIMIT: 7GiB
+      QUERY_DEFAULTS_LIMIT: "10"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+
+  # ── Milvus standalone (+ etcd + MinIO, as in Milvus' official compose) ──────
+  milvus-etcd:
+    profiles: [milvus]
+    image: quay.io/coreos/etcd:v3.5.25
+    container_name: vb-milvus-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://milvus-etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - milvus_etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 20s
+      retries: 6
+
+  milvus-minio:
+    profiles: [milvus]
+    image: milvusdb/minio:RELEASE.2024-12-18T13-15-44Z
+    container_name: vb-milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - milvus_minio:/minio_data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 20s
+      retries: 6
+
+  milvus:
+    profiles: [milvus]
+    image: milvusdb/milvus:v2.6.25
+    container_name: vb-milvus
+    <<: *engine-limits
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      MQ_TYPE: woodpecker
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      start_period: 90s
+      timeout: 20s
+      retries: 12
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+
+  # ── pgvector ────────────────────────────────────────────────────────────────
+  pgvector:
+    profiles: [pgvector]
+    image: pgvector/pgvector:0.8.7-pg17
+    container_name: vb-pgvector
+    <<: *engine-limits
+    shm_size: 2g  # parallel HNSW builds use dynamic shared memory
+    environment:
+      POSTGRES_PASSWORD: postgres
+    command:
+      - postgres
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - max_worker_processes=16
+      - -c
+      - max_parallel_workers=8
+      - -c
+      - max_parallel_maintenance_workers=7
+      - -c
+      - max_connections=64
+      - -c
+      - synchronous_commit=off  # comparable to the other engines' async durability defaults
+      - -c
+      - jit=off
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ── Chroma ──────────────────────────────────────────────────────────────────
+  chroma:
+    profiles: [chroma]
+    image: chromadb/chroma:1.5.9
+    container_name: vb-chroma
+    <<: *engine-limits
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - chroma_data:/data
+
+  # ── benchmark client ────────────────────────────────────────────────────────
+  # The remaining host CPUs go to the client so it does not compete with the
+  # engine for the engine's 8 cores (12-core host: 8 engine + 4 client).
+  client:
+    profiles: [client]
+    build: ./client
+    image: vecbench-client:local
+    cpus: "4"
+    mem_limit: 3g
+    working_dir: /bench
+    volumes:
+      - ./:/bench
+
+volumes:
+  goatdb_data:
+  qdrant_data:
+  weaviate_data:
+  milvus_etcd:
+  milvus_minio:
+  milvus_data:
+  pgvector_data:
+  chroma_data:

@@ -1,0 +1,6 @@
+# ann-benchmarks HDF5 files (~1 GB total); fetch with ./download.sh
+data/
+# docker stats / du samples; the merged numbers end up in results/*.json
+results/raw/
+.venv/
+__pycache__/
