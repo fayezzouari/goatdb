@@ -246,6 +246,8 @@ Response `201`:
 { "id": "doc-001" }
 ```
 
+Returns `409` if a vector with this id already exists. Use `PUT` to update it.
+
 ---
 
 **Bulk add**
@@ -268,7 +270,7 @@ Response `201`:
 { "inserted": 2 }
 ```
 
-All vectors are validated before any are written. If one has a wrong dimension, the entire batch is rejected.
+All vectors are validated before any are written. If one has a wrong dimension or an id appears twice in the request, the entire batch is rejected with `400`. If any id already exists, the entire batch is rejected with `409`.
 
 ---
 
