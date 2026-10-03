@@ -203,6 +203,74 @@ func TestHNSWRecallNoCodebook(t *testing.T) {
 	}
 }
 
+// clusteredVectors returns n vectors drawn from nClusters tight gaussian
+// clusters whose centers are spread across [-10, 10]^dim.
+func clusteredVectors(r *rand.Rand, n, nClusters, dim int) []core.Vector {
+	centers := make([][]float32, nClusters)
+	for c := range centers {
+		centers[c] = make([]float32, dim)
+		for j := range centers[c] {
+			centers[c][j] = r.Float32()*20 - 10
+		}
+	}
+	vecs := make([]core.Vector, n)
+	for i := range vecs {
+		center := centers[r.Intn(nClusters)]
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = center[j] + float32(r.NormFloat64())*0.5
+		}
+		vecs[i] = core.Vector{Embeddings: emb}
+	}
+	return vecs
+}
+
+// avgRecall returns the mean recall@topK of idx against exact search.
+func avgRecall(idx core.Index, flat *FlatIndex, queries []core.Vector, topK int) float64 {
+	var total float64
+	for _, q := range queries {
+		gt := make(map[string]struct{}, topK)
+		for _, r := range flat.Search(q, topK) {
+			gt[r.Id] = struct{}{}
+		}
+		hits := 0
+		for _, r := range idx.Search(q, topK) {
+			if _, ok := gt[r.Id]; ok {
+				hits++
+			}
+		}
+		total += float64(hits) / float64(len(gt))
+	}
+	return total / float64(len(queries))
+}
+
+// TestHNSWRecallClustered measures recall on clustered data, where naive
+// closest-M neighbor selection links every node into its own cluster only.
+func TestHNSWRecallClustered(t *testing.T) {
+	const n, nClusters, dim, topK, nq = 10000, 200, 32, 10, 200
+	r := rand.New(rand.NewSource(11))
+	vecs := clusteredVectors(r, n+nq, nClusters, dim)
+	data, queries := vecs[:n], vecs[n:]
+
+	flat := NewFlatIndex(dim, core.Euclidean)
+	hnsw := NewHNSWIndex(dim, 8, 64, 10, core.Euclidean)
+	for i, v := range data {
+		id := fmt.Sprintf("v%d", i)
+		flat.AddVector(id, v)
+		hnsw.AddVector(id, v)
+	}
+
+	var recall float64
+	for _, ef := range []int{10, 20, 40, 80} {
+		hnsw.ef = ef
+		recall = avgRecall(hnsw, flat, queries, topK)
+		t.Logf("clustered recall@%d ef=%d: %.1f%%", topK, ef, recall*100)
+	}
+	if recall < 0.9 {
+		t.Errorf("recall at ef=80 too low: %.1f%% (expected >= 90%%)", recall*100)
+	}
+}
+
 func TestCandidateHeaps(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	var mn candMinHeap

@@ -118,6 +118,14 @@ type searchScratch struct {
 	// next searchLayer call on the same scratch.
 	result []candidate
 	ep     []candidate
+	// Buffers for neighbor selection in AddVector. selected holds the new
+	// node's neighbors while prune* are used to shrink a neighbor's
+	// overflowing connection list, so they must not share memory.
+	selected    []candidate
+	discarded   []candidate
+	pruneCands  []candidate
+	pruneSel    []candidate
+	pruneDiscrd []candidate
 }
 
 type hnswNode struct {
@@ -133,6 +141,10 @@ type HNSWIndex struct {
 	efConstruction int
 	ef             int
 	mL             float64
+	// keepPruned (keepPrunedConnections in the paper) fills a node's
+	// remaining connection slots with candidates the neighbor heuristic
+	// discarded, so sparse regions keep their full degree.
+	keepPruned     bool
 	nodes          map[string]*hnswNode
 	slotToNode     []*hnswNode
 	entrySlot      int32
@@ -156,6 +168,7 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		efConstruction: efConstruction,
 		ef:             ef,
 		mL:             1.0 / math.Log(float64(M)),
+		keepPruned:     true,
 		nodes:          make(map[string]*hnswNode),
 		maxLayer:       -1,
 		distanceMetric: metric,
@@ -313,12 +326,71 @@ func sortCandidates(c []candidate) {
 	slices.SortFunc(c, func(a, b candidate) int { return cmp.Compare(a.dist, b.dist) })
 }
 
-func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int) []candidate {
-	if len(candidates) <= M {
-		return candidates
+// selectNeighbors picks up to M neighbors from candidates (sorted by
+// ascending distance to the base node) with the heuristic of Malkov &
+// Yashunin, Algorithm 4: a candidate is kept only if it is closer to the base
+// node than to every neighbor selected so far. This spreads links across
+// clusters instead of pointing them all into the nearest dense one. With
+// keepPruned, discarded candidates fill any remaining slots in
+// distance order.
+//
+// sel and discarded are reusable buffers; the selection is returned in sel's
+// backing array and must not alias candidates.
+func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int, sel, discarded []candidate) (selOut, discardedOut []candidate) {
+	sel = sel[:0]
+	discarded = discarded[:0]
+	if h.keepPruned && len(candidates) <= M {
+		return append(sel, candidates...), discarded
 	}
-	return candidates[:M]
+	for _, c := range candidates {
+		if len(sel) >= M {
+			break
+		}
+		cVec := h.pool.Get(c.slot)
+		good := true
+		for _, r := range sel {
+			if h.dist(cVec, h.pool.Get(r.slot)) < c.dist {
+				good = false
+				break
+			}
+		}
+		if good {
+			sel = append(sel, c)
+		} else {
+			discarded = append(discarded, c)
+		}
+	}
+	if h.keepPruned {
+		for _, c := range discarded {
+			if len(sel) >= M {
+				break
+			}
+			sel = append(sel, c)
+		}
+	}
+	return sel, discarded
 }
+
+// pruneConnections shrinks the connection list of the node at slot on layer
+// to at most mMax entries using the same heuristic as selectNeighbors.
+func (h *HNSWIndex) pruneConnections(s *searchScratch, slot int32, layer, mMax int) {
+	node := h.slotToNode[slot]
+	conns := node.connections[layer]
+	vec := h.pool.Get(slot)
+	cands := s.pruneCands[:0]
+	for _, c := range conns {
+		cands = append(cands, candidate{c, h.dist(vec, h.pool.Get(c))})
+	}
+	sortCandidates(cands)
+	sel, disc := h.selectNeighbors(cands, mMax, s.pruneSel, s.pruneDiscrd)
+	conns = conns[:0]
+	for _, c := range sel {
+		conns = append(conns, c.slot)
+	}
+	node.connections[layer] = conns
+	s.pruneCands, s.pruneSel, s.pruneDiscrd = cands, sel, disc
+}
+
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
 	q := vector.Embeddings
@@ -383,8 +455,11 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 			}
 			sortCandidates(candidates)
 		}
-		neighbors := h.selectNeighbors(candidates, mMax)
-		conns := make([]int32, len(neighbors), mMax)
+		// As in the paper (Algorithm 1), the new node links to M neighbors
+		// on every layer; back-links can grow its list up to mMax.
+		neighbors, disc := h.selectNeighbors(candidates, h.M, s.selected, s.discarded)
+		s.selected, s.discarded = neighbors, disc
+		conns := make([]int32, len(neighbors), mMax+1)
 		for i, nb := range neighbors {
 			conns[i] = nb.slot
 		}
@@ -394,23 +469,9 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 			if layer >= len(nbNode.connections) {
 				continue
 			}
-			conns := nbNode.connections[layer]
-			if len(conns) < mMax {
-				nbNode.connections[layer] = append(conns, poolIdx)
-				continue
-			}
-
-			nbVec := h.pool.Get(nb.slot)
-			newDist := h.dist(nbVec, h.pool.Get(poolIdx))
-			worstIdx, worstDist := -1, float32(-1)
-			for ci, connSlot := range conns {
-				d := h.dist(nbVec, h.pool.Get(connSlot))
-				if d > worstDist {
-					worstDist, worstIdx = d, ci
-				}
-			}
-			if worstIdx >= 0 && newDist < worstDist {
-				nbNode.connections[layer][worstIdx] = poolIdx
+			nbNode.connections[layer] = append(nbNode.connections[layer], poolIdx)
+			if len(nbNode.connections[layer]) > mMax {
+				h.pruneConnections(s, nb.slot, layer, mMax)
 			}
 		}
 		ep = candidates
