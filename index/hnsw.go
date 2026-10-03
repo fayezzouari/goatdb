@@ -150,6 +150,7 @@ type HNSWIndex struct {
 	entrySlot      int32
 	maxLayer       int
 	distanceMetric core.DistanceMetric
+	metric         core.Metric
 	pool           *core.VectorPool
 	codebook       *core.SQCodebook
 	sqPool         *core.Int8VectorPool
@@ -172,6 +173,7 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		nodes:          make(map[string]*hnswNode),
 		maxLayer:       -1,
 		distanceMetric: metric,
+		metric:         core.ResolveMetric(metric),
 		pool:           core.NewVectorPool(dim, 64),
 	}
 	return h
@@ -181,6 +183,7 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	vectors = prepareVectors(h.metric, vectors, hnswMaxTrainVecs)
 	cb := core.NewSQCodebook(vectors)
 	if cb == nil {
 		return
@@ -209,12 +212,15 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 	}
 }
 
+// hnswMaxTrainVecs caps the normalized copies made for codebook training.
+const hnswMaxTrainVecs = 100_000
+
 func (h *HNSWIndex) randomLevel() int {
 	return int(-math.Log(rand.Float64()) * h.mL)
 }
 
 func (h *HNSWIndex) dist(a, b []float32) float32 {
-	return core.DistSlices(a, b, h.distanceMetric)
+	return h.metric.Dist(a, b)
 }
 
 func (h *HNSWIndex) growSlotToNode(slot int32) {
@@ -393,12 +399,13 @@ func (h *HNSWIndex) pruneConnections(s *searchScratch, slot int32, layer, mMax i
 
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
-	q := vector.Embeddings
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	poolIdx := h.pool.Add(q)
+	poolIdx := h.pool.Add(vector.Embeddings)
+	q := h.pool.Get(poolIdx)
+	h.metric.PrepareInPlace(q)
 	if h.codebook != nil {
 		h.sqPool.Grow(int(poolIdx) + 1)
 		h.sqPool.Set(poolIdx, h.codebook.Quantize(q))
@@ -542,7 +549,7 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 		return nil
 	}
 
-	q := query.Embeddings
+	q := h.metric.Prepare(query.Embeddings)
 	var qInt8 []int8
 	if h.codebook != nil {
 		qInt8 = h.codebook.Quantize(q)
@@ -572,7 +579,7 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 	for i := 0; i < topK && i < len(candidates); i++ {
 		results = append(results, core.SearchResult{
 			Id:       h.slotToNode[candidates[i].slot].id,
-			Distance: candidates[i].dist,
+			Distance: h.metric.Finalize(candidates[i].dist),
 		})
 	}
 	return results
@@ -602,6 +609,7 @@ type hnswState struct {
 	PQNCentroids   int
 	PQCentroids    []float32
 	HasPQ          bool
+	Normalized     bool
 }
 
 func (h *HNSWIndex) Save(path string) error {
@@ -644,6 +652,7 @@ func (h *HNSWIndex) Save(path string) error {
 		EntryPoint:     entryID,
 		MaxLayer:       h.maxLayer,
 		Nodes:          nodes,
+		Normalized:     h.metric.Normalizes(),
 	}
 	if h.codebook != nil {
 		state.HasSQ = true
@@ -678,6 +687,7 @@ func (h *HNSWIndex) Load(path string) error {
 	h.ef = s.Ef
 	h.mL = s.ML
 	h.distanceMetric = s.DistanceMetric
+	h.metric = core.ResolveMetric(s.DistanceMetric)
 	h.maxLayer = s.MaxLayer
 	h.pool = core.NewVectorPool(s.Dim, len(s.Nodes))
 	h.nodes = make(map[string]*hnswNode, len(s.Nodes))
@@ -685,6 +695,9 @@ func (h *HNSWIndex) Load(path string) error {
 
 	for id, ns := range s.Nodes {
 		poolIdx := h.pool.Add(ns.Embeddings)
+		if !s.Normalized {
+			h.metric.PrepareInPlace(h.pool.Get(poolIdx))
+		}
 		node := &hnswNode{id: id, poolIdx: poolIdx}
 		h.nodes[id] = node
 		h.growSlotToNode(poolIdx)
@@ -710,6 +723,16 @@ func (h *HNSWIndex) Load(path string) error {
 
 	if s.HasSQ {
 		h.codebook = &core.SQCodebook{Min: s.SQMin, Scale: s.SQScale, Dim: s.Dim}
+		if !s.Normalized && h.metric.Normalizes() {
+			// Older files trained SQ on raw vectors; retrain on the normalized ones.
+			vecs := make([]core.Vector, 0, len(h.nodes))
+			for _, node := range h.nodes {
+				vecs = append(vecs, core.Vector{Embeddings: h.pool.Get(node.poolIdx)})
+			}
+			if cb := core.NewSQCodebook(vecs); cb != nil {
+				h.codebook = cb
+			}
+		}
 		h.sqPool = core.NewInt8VectorPool(s.Dim, h.pool.Slots())
 		for _, node := range h.nodes {
 			h.sqPool.Set(node.poolIdx, h.codebook.Quantize(h.pool.Get(node.poolIdx)))
