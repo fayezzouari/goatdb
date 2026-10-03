@@ -13,6 +13,7 @@ var (
 	bucketSlots  = []byte("slots")
 	bucketMeta   = []byte("meta")
 	bucketConfig = []byte("config")
+	bucketFree   = []byte("free_slots")
 	keyNextSlot  = []byte("next_slot")
 	keyFreeSlots = []byte("free_slots")
 )
@@ -33,12 +34,12 @@ func openMetaStore(path string) (*MetaStore, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketSlots, bucketMeta, bucketConfig} {
+		for _, b := range [][]byte{bucketSlots, bucketMeta, bucketConfig, bucketFree} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
 		}
-		return nil
+		return migrateFreeSlots(tx)
 	})
 	return &MetaStore{db: db}, err
 }
@@ -88,12 +89,10 @@ func allocSlots(tx *bolt.Tx, n int) []uint32 {
 	cfg := tx.Bucket(bucketConfig)
 	slots := make([]uint32, 0, n)
 
-	if raw := cfg.Get(keyFreeSlots); len(raw) >= 4 {
-		k := min(n, len(raw)/4)
-		for i := 0; i < k; i++ {
-			slots = append(slots, binary.LittleEndian.Uint32(raw[i*4:]))
-		}
-		cfg.Put(keyFreeSlots, append([]byte(nil), raw[k*4:]...))
+	c := tx.Bucket(bucketFree).Cursor()
+	for k, _ := c.First(); k != nil && len(slots) < n; k, _ = c.First() {
+		slots = append(slots, binary.BigEndian.Uint32(k))
+		c.Delete()
 	}
 
 	if len(slots) < n {
@@ -110,6 +109,30 @@ func allocSlots(tx *bolt.Tx, n int) []uint32 {
 		cfg.Put(keyNextSlot, buf[:])
 	}
 	return slots
+}
+
+// freeSlot records slot as reusable. Keys are big-endian so the cursor
+// hands out the lowest free slot first.
+func freeSlot(tx *bolt.Tx, slot uint32) error {
+	var key [4]byte
+	binary.BigEndian.PutUint32(key[:], slot)
+	return tx.Bucket(bucketFree).Put(key[:], []byte{})
+}
+
+// migrateFreeSlots moves the legacy free list, stored as one little-endian
+// blob under config/free_slots, into the free_slots bucket.
+func migrateFreeSlots(tx *bolt.Tx) error {
+	cfg := tx.Bucket(bucketConfig)
+	raw := cfg.Get(keyFreeSlots)
+	if raw == nil {
+		return nil
+	}
+	for i := 0; i+4 <= len(raw); i += 4 {
+		if err := freeSlot(tx, binary.LittleEndian.Uint32(raw[i:])); err != nil {
+			return err
+		}
+	}
+	return cfg.Delete(keyFreeSlots)
 }
 
 func putSlot(tx *bolt.Tx, id string, slot uint32) error {
@@ -165,15 +188,13 @@ func (m *MetaStore) Delete(id string) error {
 		}
 		slot := binary.LittleEndian.Uint32(slotRaw)
 
-		cfg := tx.Bucket(bucketConfig)
-		existing := cfg.Get(keyFreeSlots)
-		var freeBuf [4]byte
-		binary.LittleEndian.PutUint32(freeBuf[:], slot)
-		cfg.Put(keyFreeSlots, append(existing, freeBuf[:]...))
-
-		tx.Bucket(bucketSlots).Delete([]byte(id))
-		tx.Bucket(bucketMeta).Delete([]byte(id))
-		return nil
+		if err := freeSlot(tx, slot); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketSlots).Delete([]byte(id)); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketMeta).Delete([]byte(id))
 	})
 }
 
