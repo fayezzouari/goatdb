@@ -1,12 +1,12 @@
 package index
 
 import (
-	"container/heap"
+	"cmp"
 	"encoding/gob"
 	"math"
 	"math/rand"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/fayez/goatdb/core"
@@ -17,21 +17,108 @@ type candidate struct {
 	dist float32
 }
 
-type minHeap []candidate
+// candMinHeap and candMaxHeap are typed binary heaps over []candidate.
+// They avoid container/heap, whose Push(any)/Pop() any box every candidate
+// into an interface and allocate on each call.
+type candMinHeap []candidate
 
-func (h minHeap) Len() int           { return len(h) }
-func (h minHeap) Less(i, j int) bool { return h[i].dist < h[j].dist }
-func (h minHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *minHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
-func (h *minHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h *candMinHeap) push(c candidate) {
+	*h = append(*h, c)
+	a := *h
+	i := len(a) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if a[p].dist <= a[i].dist {
+			break
+		}
+		a[p], a[i] = a[i], a[p]
+		i = p
+	}
+}
 
-type maxHeap []candidate
+func (h *candMinHeap) pop() candidate {
+	a := *h
+	top := a[0]
+	n := len(a) - 1
+	a[0] = a[n]
+	a = a[:n]
+	i := 0
+	for {
+		l := 2*i + 1
+		if l >= n {
+			break
+		}
+		m := l
+		if r := l + 1; r < n && a[r].dist < a[l].dist {
+			m = r
+		}
+		if a[i].dist <= a[m].dist {
+			break
+		}
+		a[i], a[m] = a[m], a[i]
+		i = m
+	}
+	*h = a
+	return top
+}
 
-func (h maxHeap) Len() int           { return len(h) }
-func (h maxHeap) Less(i, j int) bool { return h[i].dist > h[j].dist }
-func (h maxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *maxHeap) Push(x any)        { *h = append(*h, x.(candidate)) }
-func (h *maxHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+type candMaxHeap []candidate
+
+func (h *candMaxHeap) push(c candidate) {
+	*h = append(*h, c)
+	a := *h
+	i := len(a) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if a[p].dist >= a[i].dist {
+			break
+		}
+		a[p], a[i] = a[i], a[p]
+		i = p
+	}
+}
+
+func (h *candMaxHeap) pop() candidate {
+	a := *h
+	top := a[0]
+	n := len(a) - 1
+	a[0] = a[n]
+	a = a[:n]
+	i := 0
+	for {
+		l := 2*i + 1
+		if l >= n {
+			break
+		}
+		m := l
+		if r := l + 1; r < n && a[r].dist > a[l].dist {
+			m = r
+		}
+		if a[i].dist >= a[m].dist {
+			break
+		}
+		a[i], a[m] = a[m], a[i]
+		i = m
+	}
+	*h = a
+	return top
+}
+
+// searchScratch holds the per-operation buffers used by searchLayer. One
+// scratch is taken from HNSWIndex.scratchPool for a whole Search or AddVector
+// call, so concurrent searches under the read lock never share one.
+type searchScratch struct {
+	// visited is indexed by pool slot. Only the entries listed in dirty are
+	// non-zero, and they are reset before searchLayer returns.
+	visited []byte
+	dirty   []int32
+	cands   candMinHeap
+	W       candMaxHeap
+	// result is the buffer searchLayer returns. It is overwritten by the
+	// next searchLayer call on the same scratch.
+	result []candidate
+	ep     []candidate
+}
 
 type hnswNode struct {
 	id          string
@@ -56,10 +143,10 @@ type HNSWIndex struct {
 	sqPool         *core.Int8VectorPool
 	pqCodebook     *core.PQCodebook
 	pqPool         *core.PQPool
-	// visitedPool reuses []byte visited arrays across searchLayer calls.
-	// Flat array lookup is O(1) at ~2ns vs map at ~50ns — at efConstruction=200
-	// and M=24 this saves ~690µs per AddVector, 11+ minutes at 1M.
-	visitedPool sync.Pool
+	// scratchPool reuses searchScratch buffers (visited array, heaps, result)
+	// across Search and AddVector calls. Flat array lookup is O(1) at ~2ns vs
+	// map at ~50ns, and reusing the heaps removes per-push allocations.
+	scratchPool sync.Pool
 }
 
 func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *HNSWIndex {
@@ -74,7 +161,6 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 		distanceMetric: metric,
 		pool:           core.NewVectorPool(dim, 64),
 	}
-	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
 	return h
 }
 
@@ -131,32 +217,48 @@ func (h *HNSWIndex) slotDist(q []float32, qInt8 []int8, slot int32) float32 {
 	return h.dist(q, h.pool.Get(slot))
 }
 
-func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
+func (h *HNSWIndex) getScratch() *searchScratch {
+	if s, ok := h.scratchPool.Get().(*searchScratch); ok {
+		return s
+	}
+	return &searchScratch{}
+}
+
+func (h *HNSWIndex) putScratch(s *searchScratch) {
+	h.scratchPool.Put(s)
+}
+
+// searchLayer runs a greedy beam search on one layer and returns up to ef
+// candidates sorted by ascending distance.
+//
+// The returned slice is s.result: it stays valid only until the next
+// searchLayer call on the same scratch. eps may alias s.result, because the
+// entry points are copied into the heaps before s.result is rewritten.
+func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
 	nSlots := h.pool.Slots()
-	vbp := h.visitedPool.Get().(*[]byte)
-	vb := *vbp
+	vb := s.visited
 	if cap(vb) < nSlots {
 		vb = make([]byte, nSlots)
 	} else {
 		vb = vb[:nSlots]
 	}
-	dirty := make([]int32, 0, ef*4)
-
-	cands := &minHeap{}
-	W := &maxHeap{}
+	s.visited = vb
+	dirty := s.dirty[:0]
+	cands := s.cands[:0]
+	W := s.W[:0]
 
 	for _, ep := range eps {
-		heap.Push(cands, ep)
-		heap.Push(W, ep)
+		cands.push(ep)
+		W.push(ep)
 		if int(ep.slot) < len(vb) && vb[ep.slot] == 0 {
 			vb[ep.slot] = 1
 			dirty = append(dirty, ep.slot)
 		}
 	}
 
-	for cands.Len() > 0 {
-		c := heap.Pop(cands).(candidate)
-		if c.dist > (*W)[0].dist {
+	for len(cands) > 0 {
+		c := cands.pop()
+		if c.dist > W[0].dist {
 			break
 		}
 		node := h.slotToNode[c.slot]
@@ -172,30 +274,43 @@ func (h *HNSWIndex) searchLayer(query []float32, queryInt8 []int8, eps []candida
 				dirty = append(dirty, nbSlot)
 			}
 			d := h.slotDist(query, queryInt8, nbSlot)
-			if d < (*W)[0].dist || W.Len() < ef {
-				heap.Push(cands, candidate{nbSlot, d})
-				heap.Push(W, candidate{nbSlot, d})
-				if W.Len() > ef {
-					heap.Pop(W)
+			if d < W[0].dist || len(W) < ef {
+				cands.push(candidate{nbSlot, d})
+				W.push(candidate{nbSlot, d})
+				if len(W) > ef {
+					W.pop()
 				}
 			}
 		}
 	}
 
-	result := make([]candidate, W.Len())
-	for i := len(result) - 1; i >= 0; i-- {
-		result[i] = heap.Pop(W).(candidate)
+	n := len(W)
+	result := s.result[:0]
+	if cap(result) < n {
+		result = make([]candidate, n)
+	} else {
+		result = result[:n]
+	}
+	for i := n - 1; i >= 0; i-- {
+		result[i] = W.pop()
 	}
 
-	for _, s := range dirty {
-		if int(s) < len(vb) {
-			vb[s] = 0
+	for _, slot := range dirty {
+		if int(slot) < len(vb) {
+			vb[slot] = 0
 		}
 	}
-	*vbp = vb
-	h.visitedPool.Put(vbp)
-
+	s.dirty = dirty[:0]
+	s.cands = cands[:0]
+	s.W = W[:0]
+	s.result = result
 	return result
+}
+
+// sortCandidates sorts by ascending distance without the reflection and
+// closure allocations of sort.Slice.
+func sortCandidates(c []candidate) {
+	slices.SortFunc(c, func(a, b candidate) int { return cmp.Compare(a.dist, b.dist) })
 }
 
 func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int) []candidate {
@@ -243,10 +358,14 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
+	s := h.getScratch()
+	defer h.putScratch(s)
+
+	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	s.ep = ep
 
 	for layer := h.maxLayer; layer > level; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
@@ -255,18 +374,21 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		if layer == 0 {
 			mMax = h.M * 2
 		}
-		candidates := h.searchLayer(q, qInt8, ep, h.efConstruction, layer)
+		// candidates aliases s.result; it is fully consumed (and reused as
+		// the next layer's entry points) before searchLayer runs again.
+		candidates := h.searchLayer(s, q, qInt8, ep, h.efConstruction, layer)
 		if qInt8 != nil {
 			for i := range candidates {
 				candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
 			}
-			sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+			sortCandidates(candidates)
 		}
 		neighbors := h.selectNeighbors(candidates, mMax)
-		node.connections[layer] = make([]int32, len(neighbors))
+		conns := make([]int32, len(neighbors), mMax)
 		for i, nb := range neighbors {
-			node.connections[layer][i] = nb.slot
+			conns[i] = nb.slot
 		}
+		node.connections[layer] = conns
 		for _, nb := range neighbors {
 			nbNode := h.slotToNode[nb.slot]
 			if layer >= len(nbNode.connections) {
@@ -365,20 +487,24 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 		qInt8 = h.codebook.Quantize(q)
 	}
 
-	ep := []candidate{{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)}}
+	s := h.getScratch()
+	defer h.putScratch(s)
+
+	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	s.ep = ep
 
 	for layer := h.maxLayer; layer > 0; layer-- {
-		result := h.searchLayer(q, qInt8, ep, 1, layer)
+		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	candidates := h.searchLayer(q, qInt8, ep, max(h.ef, topK), 0)
+	candidates := h.searchLayer(s, q, qInt8, ep, max(h.ef, topK), 0)
 
 	if qInt8 != nil {
 		for i := range candidates {
 			candidates[i].dist = h.dist(q, h.pool.Get(candidates[i].slot))
 		}
-		sort.Slice(candidates, func(i, j int) bool { return candidates[i].dist < candidates[j].dist })
+		sortCandidates(candidates)
 	}
 
 	results := make([]core.SearchResult, 0, topK)
@@ -539,6 +665,5 @@ func (h *HNSWIndex) Load(path string) error {
 			h.pqPool.Set(node.poolIdx, h.pqCodebook.Encode(h.pool.Get(node.poolIdx)))
 		}
 	}
-	h.visitedPool.New = func() any { b := make([]byte, 0); return &b }
 	return nil
 }
