@@ -74,10 +74,30 @@ func BenchmarkLSHAddVector(b *testing.B) {
 func BenchmarkHNSWAddVector(b *testing.B) {
 	idx := NewHNSWIndex(benchDim, 16, 200, 50, core.Euclidean)
 	v := randomVector(benchDim)
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		idx.AddVector(randomID(i), v)
 	}
+}
+
+// BenchmarkHNSWBuild measures building a whole index from random vectors,
+// which exercises searchLayer with efConstruction on a realistic graph.
+func BenchmarkHNSWBuild(b *testing.B) {
+	const n = 5000
+	vecs := make([]core.Vector, n)
+	for i := range vecs {
+		vecs[i] = randomVector(benchDim)
+	}
+	b.Run(sizeLabel(n), func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			idx := NewHNSWIndex(benchDim, 16, 200, 50, core.Euclidean)
+			for j, v := range vecs {
+				idx.AddVector(randomID(j), v)
+			}
+		}
+	})
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -118,12 +138,30 @@ func BenchmarkHNSWSearch(b *testing.B) {
 		idx := populateHNSW(n)
 		query := randomVector(benchDim)
 		b.Run(sizeLabel(n), func(b *testing.B) {
+			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				idx.Search(query, 10)
 			}
 		})
 	}
+}
+
+func BenchmarkHNSWSearchParallel(b *testing.B) {
+	idx := populateHNSW(10000)
+	queries := make([]core.Vector, 64)
+	for i := range queries {
+		queries[i] = randomVector(benchDim)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			idx.Search(queries[i%len(queries)], 10)
+			i++
+		}
+	})
 }
 
 func BenchmarkIVFSearch(b *testing.B) {

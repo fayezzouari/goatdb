@@ -3,6 +3,7 @@ package index
 import (
 	"fmt"
 	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/fayez/goatdb/core"
@@ -200,4 +201,123 @@ func TestHNSWRecallNoCodebook(t *testing.T) {
 	if recall < 0.5 {
 		t.Errorf("recall too low: %.1f%%", recall*100)
 	}
+}
+
+func TestCandidateHeaps(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	var mn candMinHeap
+	var mx candMaxHeap
+	for i := 0; i < 500; i++ {
+		d := r.Float32()
+		mn.push(candidate{int32(i), d})
+		mx.push(candidate{int32(i), d})
+	}
+	prevMin, prevMax := float32(-1), float32(2)
+	for len(mn) > 0 {
+		c := mn.pop()
+		if c.dist < prevMin {
+			t.Fatalf("min heap out of order: %v after %v", c.dist, prevMin)
+		}
+		prevMin = c.dist
+	}
+	for len(mx) > 0 {
+		c := mx.pop()
+		if c.dist > prevMax {
+			t.Fatalf("max heap out of order: %v after %v", c.dist, prevMax)
+		}
+		prevMax = c.dist
+	}
+}
+
+// TestHNSWConcurrentSearch checks that concurrent searches, which share the
+// scratch pool, return the same results as sequential searches.
+func TestHNSWConcurrentSearch(t *testing.T) {
+	const n, dim = 2000, 32
+	r := rand.New(rand.NewSource(7))
+	idx := NewHNSWIndex(dim, 16, 100, 64, core.Euclidean)
+	queries := make([]core.Vector, 32)
+	for i := 0; i < n; i++ {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = r.Float32()*2 - 1
+		}
+		idx.AddVector(fmt.Sprintf("v%d", i), core.Vector{Embeddings: emb})
+		if i < len(queries) {
+			queries[i] = core.Vector{Embeddings: emb}
+		}
+	}
+
+	want := make([][]core.SearchResult, len(queries))
+	for i, q := range queries {
+		want[i] = idx.Search(q, 10)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan string, 8)
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for it := 0; it < 50; it++ {
+				qi := (g + it) % len(queries)
+				got := idx.Search(queries[qi], 10)
+				if len(got) != len(want[qi]) {
+					errs <- fmt.Sprintf("query %d: got %d results, want %d", qi, len(got), len(want[qi]))
+					return
+				}
+				for k := range got {
+					if got[k].Id != want[qi][k].Id {
+						errs <- fmt.Sprintf("query %d: result %d = %s, want %s", qi, k, got[k].Id, want[qi][k].Id)
+						return
+					}
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+}
+
+// TestHNSWConcurrentAddSearch runs inserts and searches together; run it
+// with -race.
+func TestHNSWConcurrentAddSearch(t *testing.T) {
+	const dim = 16
+	idx := NewHNSWIndex(dim, 8, 50, 32, core.Euclidean)
+	vec := func(r *rand.Rand) core.Vector {
+		emb := make([]float32, dim)
+		for j := range emb {
+			emb[j] = r.Float32()
+		}
+		return core.Vector{Embeddings: emb}
+	}
+	seed := rand.New(rand.NewSource(3))
+	for i := 0; i < 200; i++ {
+		idx.AddVector(fmt.Sprintf("seed%d", i), vec(seed))
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(2)
+		go func(g int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(100 + g)))
+			for i := 0; i < 200; i++ {
+				idx.AddVector(fmt.Sprintf("w%d-%d", g, i), vec(r))
+			}
+		}(g)
+		go func(g int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(200 + g)))
+			for i := 0; i < 200; i++ {
+				if res := idx.Search(vec(r), 5); len(res) != 5 {
+					t.Errorf("expected 5 results, got %d", len(res))
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }
