@@ -109,14 +109,20 @@ func (s *Store) Add(id string, embeddings []float32, metadata map[string]any) er
 }
 
 // AddBatch inserts vectors with one WAL write, one fsync and one metadata
-// transaction.
+// transaction. The batch is rejected as a whole if any id is repeated or
+// already stored.
 func (s *Store) AddBatch(vectors []StoredVector) error {
 	if len(vectors) == 0 {
 		return nil
 	}
 	ids := make([]string, len(vectors))
 	metas := make([][]byte, len(vectors))
+	seen := make(map[string]struct{}, len(vectors))
 	for i, v := range vectors {
+		if _, dup := seen[v.Id]; dup {
+			return fmt.Errorf("vector %q: %w", v.Id, ErrDuplicateID)
+		}
+		seen[v.Id] = struct{}{}
 		if len(v.Embeddings) != s.vectors.dim {
 			return fmt.Errorf("vector %q: expected %d dimensions, got %d", v.Id, s.vectors.dim, len(v.Embeddings))
 		}

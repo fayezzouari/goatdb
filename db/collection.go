@@ -12,6 +12,11 @@ import (
 	"github.com/fayez/goatdb/storage"
 )
 
+var (
+	ErrExists      = storage.ErrExists
+	ErrDuplicateID = storage.ErrDuplicateID
+)
+
 type Collection struct {
 	name      string
 	dim       int
@@ -96,16 +101,29 @@ func (c *Collection) AddVector(ctx context.Context, id string, vector core.Vecto
 	return nil
 }
 
-func (c *Collection) AddVectors(ctx context.Context, vectors map[string]core.Vector) error {
+// VectorEntry is a vector with its id, as passed to AddVectors.
+type VectorEntry struct {
+	Id string
+	core.Vector
+}
+
+// AddVectors inserts all vectors or none. It fails with ErrDuplicateID if an id
+// repeats within the batch and with ErrExists if an id is already stored.
+func (c *Collection) AddVectors(ctx context.Context, vectors []VectorEntry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	batch := make([]storage.StoredVector, 0, len(vectors))
-	for id, v := range vectors {
+	seen := make(map[string]struct{}, len(vectors))
+	for _, v := range vectors {
 		if len(v.Embeddings) != c.dim {
-			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", id, c.dim, len(v.Embeddings))
+			return fmt.Errorf("vector %q: dimension mismatch: expected %d, got %d", v.Id, c.dim, len(v.Embeddings))
 		}
-		batch = append(batch, storage.StoredVector{Id: id, Embeddings: v.Embeddings, Metadata: v.Metadata})
+		if _, dup := seen[v.Id]; dup {
+			return fmt.Errorf("vector %q: %w", v.Id, ErrDuplicateID)
+		}
+		seen[v.Id] = struct{}{}
+		batch = append(batch, storage.StoredVector{Id: v.Id, Embeddings: v.Embeddings, Metadata: v.Metadata})
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

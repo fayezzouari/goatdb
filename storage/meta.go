@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	msgpack "github.com/shamaton/msgpack/v2"
 	bolt "go.etcd.io/bbolt"
@@ -16,7 +17,11 @@ var (
 	keyFreeSlots = []byte("free_slots")
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound    = errors.New("not found")
+	ErrExists      = errors.New("already exists")
+	ErrDuplicateID = errors.New("duplicate id in batch")
+)
 
 type MetaStore struct {
 	db *bolt.DB
@@ -49,11 +54,18 @@ func (m *MetaStore) AllocSlot(id string) (uint32, error) {
 }
 
 // Insert allocates a slot for each id and stores its metadata in a single
-// transaction. beforeCommit runs inside the transaction once slots are known;
-// if it fails, nothing is committed.
+// transaction. It fails with ErrExists if any id is already present.
+// beforeCommit runs inside the transaction once slots are known; if it fails,
+// nothing is committed.
 func (m *MetaStore) Insert(ids []string, metas [][]byte, beforeCommit func(slots []uint32) error) ([]uint32, error) {
 	var slots []uint32
 	err := m.db.Update(func(tx *bolt.Tx) error {
+		slotBucket := tx.Bucket(bucketSlots)
+		for _, id := range ids {
+			if slotBucket.Get([]byte(id)) != nil {
+				return fmt.Errorf("vector %q %w", id, ErrExists)
+			}
+		}
 		slots = allocSlots(tx, len(ids))
 		metaBucket := tx.Bucket(bucketMeta)
 		for i, id := range ids {

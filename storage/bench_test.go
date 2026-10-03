@@ -114,10 +114,14 @@ func BenchmarkStoreAdd(b *testing.B) {
 		}
 		emb := randomEmbeddings(dim)
 		meta := map[string]any{"label": "bench"}
+		next := 0
 		b.Run(fmt.Sprintf("dim%d", dim), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				s.Add(benchID(i), emb, meta)
+				if err := s.Add(benchID(next), emb, meta); err != nil {
+					b.Fatal(err)
+				}
+				next++
 			}
 		})
 		s.Close()
@@ -134,12 +138,14 @@ func BenchmarkStoreAddBatch(b *testing.B) {
 		}
 		emb := randomEmbeddings(dim)
 		meta := map[string]any{"label": "bench"}
+		next := 0
 		b.Run(fmt.Sprintf("dim%d/batch%d", dim, batchSize), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				batch := make([]StoredVector, batchSize)
 				for j := range batch {
-					batch[j] = StoredVector{Id: benchID(i*batchSize + j), Embeddings: emb, Metadata: meta}
+					batch[j] = StoredVector{Id: benchID(next), Embeddings: emb, Metadata: meta}
+					next++
 				}
 				if err := s.AddBatch(batch); err != nil {
 					b.Fatal(err)
