@@ -154,8 +154,13 @@ type HNSWIndex struct {
 	pool           *core.VectorPool
 	codebook       *core.SQCodebook
 	sqPool         *core.Int8VectorPool
-	pqCodebook     *core.PQCodebook
-	pqPool         *core.PQPool
+	// trainMu serializes Train calls.
+	trainMu sync.Mutex
+	// training is set while Train quantizes vectors outside mu. AddVector
+	// then records the slots it writes in trainDirty, and Train re-quantizes
+	// them with the new codebook when it swaps the codebook in.
+	training   bool
+	trainDirty []int32
 	// scratchPool reuses searchScratch buffers (visited array, heaps, result)
 	// across Search and AddVector calls. Flat array lookup is O(1) at ~2ns vs
 	// map at ~50ns, and reusing the heaps removes per-push allocations.
@@ -179,37 +184,68 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 	return h
 }
 
+// trainChunk is the number of vectors Train quantizes per read-lock hold.
+const trainChunk = 4096
+
+// testHookTrainChunk, when set by tests, runs after each chunk Train
+// quantizes, while no index lock is held.
+var testHookTrainChunk func()
+
+// Train builds a scalar quantization codebook from vectors and quantizes
+// every indexed vector with it. The codebook is built without any index
+// lock, and vectors are quantized in chunks under the read lock, so
+// searches keep running and inserts are only delayed by one chunk. The
+// write lock is held only to swap the new codebook in.
 func (h *HNSWIndex) Train(vectors []core.Vector) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.trainMu.Lock()
+	defer h.trainMu.Unlock()
 
 	vectors = prepareVectors(h.metric, vectors, hnswMaxTrainVecs)
 	cb := core.NewSQCodebook(vectors)
 	if cb == nil {
 		return
 	}
-	h.codebook = cb
-	h.sqPool = core.NewInt8VectorPool(h.dim, max(h.pool.Slots(), 64))
-	for _, node := range h.nodes {
-		h.sqPool.Set(node.poolIdx, cb.Quantize(h.pool.Get(node.poolIdx)))
+
+	h.mu.Lock()
+	h.training = true
+	h.trainDirty = h.trainDirty[:0]
+	n := h.pool.Slots()
+	dim := h.dim
+	h.mu.Unlock()
+
+	sq := core.NewInt8VectorPool(dim, max(n, 64))
+	for start := 0; start < n; start += trainChunk {
+		end := min(start+trainChunk, n)
+		h.mu.RLock()
+		if !h.training {
+			// Load replaced the index while we were quantizing.
+			h.mu.RUnlock()
+			return
+		}
+		for slot := start; slot < end; slot++ {
+			sq.Set(int32(slot), cb.Quantize(h.pool.Get(int32(slot))))
+		}
+		h.mu.RUnlock()
+		if testHookTrainChunk != nil {
+			testHookTrainChunk()
+		}
 	}
 
-	nSubs := h.dim / 8
-	if nSubs < 1 {
-		nSubs = 1
-	}
-	for nSubs > 1 && h.dim%nSubs != 0 {
-		nSubs--
-	}
-	pq := core.NewPQCodebook(vectors, nSubs, 256)
-	if pq == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.training {
 		return
 	}
-	h.pqCodebook = pq
-	h.pqPool = core.NewPQPool(nSubs, max(h.pool.Slots(), 64))
-	for _, node := range h.nodes {
-		h.pqPool.Set(node.poolIdx, pq.Encode(h.pool.Get(node.poolIdx)))
+	// Slots written by AddVector after training started may hold vectors
+	// quantized from older data (or none at all); redo them.
+	sq.Grow(h.pool.Slots())
+	for _, slot := range h.trainDirty {
+		sq.Set(slot, cb.Quantize(h.pool.Get(slot)))
 	}
+	h.codebook = cb
+	h.sqPool = sq
+	h.training = false
+	h.trainDirty = nil
 }
 
 // hnswMaxTrainVecs caps the normalized copies made for codebook training.
@@ -410,9 +446,8 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		h.sqPool.Grow(int(poolIdx) + 1)
 		h.sqPool.Set(poolIdx, h.codebook.Quantize(q))
 	}
-	if h.pqCodebook != nil {
-		h.pqPool.Grow(int(poolIdx) + 1)
-		h.pqPool.Set(poolIdx, h.pqCodebook.Encode(q))
+	if h.training {
+		h.trainDirty = append(h.trainDirty, poolIdx)
 	}
 	node := &hnswNode{
 		id:          id,
@@ -592,6 +627,9 @@ type hnswNodeState struct {
 	Connections [][]string
 }
 
+// hnswState is the on-disk format. The PQ fields are kept so that files
+// written by older versions still decode; they are no longer written and are
+// ignored on Load.
 type hnswState struct {
 	Dim            int
 	M              int
@@ -659,12 +697,6 @@ func (h *HNSWIndex) Save(path string) error {
 		state.SQMin = h.codebook.Min
 		state.SQScale = h.codebook.Scale
 	}
-	if h.pqCodebook != nil {
-		state.HasPQ = true
-		state.PQNSubs = h.pqCodebook.NSubs
-		state.PQNCentroids = h.pqCodebook.NCentroids
-		state.PQCentroids = h.pqCodebook.Centroids
-	}
 	return gob.NewEncoder(file).Encode(state)
 }
 
@@ -721,6 +753,11 @@ func (h *HNSWIndex) Load(path string) error {
 		h.entrySlot = ep.poolIdx
 	}
 
+	// Abandon any Train in progress: its slots refer to the old pool.
+	h.training = false
+	h.trainDirty = nil
+	h.codebook = nil
+	h.sqPool = nil
 	if s.HasSQ {
 		h.codebook = &core.SQCodebook{Min: s.SQMin, Scale: s.SQScale, Dim: s.Dim}
 		if !s.Normalized && h.metric.Normalizes() {
@@ -736,17 +773,6 @@ func (h *HNSWIndex) Load(path string) error {
 		h.sqPool = core.NewInt8VectorPool(s.Dim, h.pool.Slots())
 		for _, node := range h.nodes {
 			h.sqPool.Set(node.poolIdx, h.codebook.Quantize(h.pool.Get(node.poolIdx)))
-		}
-	}
-	if s.HasPQ {
-		subDim := s.Dim / s.PQNSubs
-		h.pqCodebook = &core.PQCodebook{
-			NSubs: s.PQNSubs, NCentroids: s.PQNCentroids,
-			SubDim: subDim, Centroids: s.PQCentroids,
-		}
-		h.pqPool = core.NewPQPool(s.PQNSubs, h.pool.Slots())
-		for _, node := range h.nodes {
-			h.pqPool.Set(node.poolIdx, h.pqCodebook.Encode(h.pool.Get(node.poolIdx)))
 		}
 	}
 	return nil
