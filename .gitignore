@@ -4,6 +4,8 @@
 # Build output
 /goatdb
 /bench
+# ...but not the bench/ source directory (trailing slash = directories only)
+!/bench/
 /dist/
 *.exe
 *.test
