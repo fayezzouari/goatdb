@@ -3,22 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: goatdb:local
     container_name: goatdb
     ports:
       - "${GOATDB_PORT:-8080}:8080"
     volumes:
       - goatdb_data:/data
-    environment:
-      - GOATDB_ADDR=${GOATDB_ADDR:-:8080}
-      - GOATDB_DIR=${GOATDB_DIR:-/data}
-    command: ["-addr", "${GOATDB_ADDR:-:8080}", "-dir", "${GOATDB_DIR:-/data}"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
+    # GOATDB_ADDR / GOATDB_DIR default to :8080 and /data in the image; the
+    # healthcheck is defined in the Dockerfile.
 
 volumes:
   goatdb_data:

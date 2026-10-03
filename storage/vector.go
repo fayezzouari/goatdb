@@ -135,3 +135,8 @@ func (vs *VectorStore) Close() error {
 	syscall.Munmap(vs.data)
 	return vs.f.Close()
 }
+
+// Live reports whether slot holds a non-deleted record, without decoding it.
+func (vs *VectorStore) Live(slot int) bool {
+	return slot < vs.capacity && vs.data[slot*vs.recordSize+vs.dim*4] != deletedFlag
+}

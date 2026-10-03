@@ -187,3 +187,42 @@ func TestCollectionTrainConcurrent(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestCollectionSearchWithOptions(t *testing.T) {
+	col := newTestCollection(t)
+	col.AddVector(ctx, "a", core.Vector{Embeddings: []float32{1, 0}, Metadata: map[string]any{"tag": "a"}})
+	col.AddVector(ctx, "b", core.Vector{Embeddings: []float32{0, 1}, Metadata: map[string]any{"tag": "b"}})
+	q := core.Vector{Embeddings: []float32{1, 0}}
+
+	cases := []struct {
+		name     string
+		opts     SearchOptions
+		wantEmb  bool
+		wantMeta bool
+	}{
+		{"none", SearchOptions{}, false, false},
+		{"metadata", SearchOptions{IncludeMetadata: true}, false, true},
+		{"vectors", SearchOptions{IncludeVectors: true}, true, false},
+		{"both", SearchOptions{IncludeVectors: true, IncludeMetadata: true}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results, err := col.SearchWithOptions(ctx, q, 2, tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 2 || results[0].Id != "a" {
+				t.Fatalf("expected 'a' first of 2, got %v", results)
+			}
+			if got := results[0].Vector.Embeddings != nil; got != tc.wantEmb {
+				t.Errorf("embeddings present = %v, want %v", got, tc.wantEmb)
+			}
+			if got := results[0].Vector.Metadata != nil; got != tc.wantMeta {
+				t.Errorf("metadata present = %v, want %v", got, tc.wantMeta)
+			}
+			if tc.wantMeta && results[0].Vector.Metadata["tag"] != "a" {
+				t.Errorf("wrong metadata: %v", results[0].Vector.Metadata)
+			}
+		})
+	}
+}

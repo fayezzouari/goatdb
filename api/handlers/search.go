@@ -4,11 +4,15 @@ import (
 	"net/http"
 
 	"github.com/fayez/goatdb/core"
+	"github.com/fayez/goatdb/db"
 )
 
 type searchReq struct {
 	Embeddings []float32 `json:"embeddings"`
 	TopK       int       `json:"top_k"`
+	// IncludeVectors defaults to false; IncludeMetadata defaults to true.
+	IncludeVectors  bool  `json:"include_vectors"`
+	IncludeMetadata *bool `json:"include_metadata"`
 }
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +31,12 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		req.TopK = 10
 	}
 
-	results, err := col.Search(r.Context(), core.Vector{Embeddings: req.Embeddings}, req.TopK)
+	opts := db.SearchOptions{IncludeVectors: req.IncludeVectors, IncludeMetadata: true}
+	if req.IncludeMetadata != nil {
+		opts.IncludeMetadata = *req.IncludeMetadata
+	}
+
+	results, err := col.SearchWithOptions(r.Context(), core.Vector{Embeddings: req.Embeddings}, req.TopK, opts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

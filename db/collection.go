@@ -163,7 +163,20 @@ func (c *Collection) DeleteVector(ctx context.Context, id string) error {
 	return nil
 }
 
+// SearchOptions controls how search results are hydrated from storage.
+type SearchOptions struct {
+	IncludeVectors  bool
+	IncludeMetadata bool
+}
+
+// Search returns the topK nearest vectors with embeddings and metadata attached.
 func (c *Collection) Search(ctx context.Context, query core.Vector, topK int) ([]core.SearchResult, error) {
+	return c.SearchWithOptions(ctx, query, topK, SearchOptions{IncludeVectors: true, IncludeMetadata: true})
+}
+
+// SearchWithOptions returns the topK nearest vectors, hydrating only the parts
+// requested in opts.
+func (c *Collection) SearchWithOptions(ctx context.Context, query core.Vector, topK int, opts SearchOptions) ([]core.SearchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -174,12 +187,21 @@ func (c *Collection) Search(ctx context.Context, query core.Vector, topK int) ([
 	defer c.mu.RUnlock()
 
 	results := c.index.Search(query, topK)
-	for i, r := range results {
-		emb, meta, err := c.store.Get(r.Id)
-		if err != nil {
-			continue
+	if opts.IncludeVectors || opts.IncludeMetadata {
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.Id
 		}
-		results[i].Vector = core.Vector{Embeddings: emb, Metadata: meta}
+		stored, err := c.store.GetMany(ids, opts.IncludeVectors, opts.IncludeMetadata)
+		if err != nil {
+			return nil, err
+		}
+		for i, sv := range stored {
+			if sv.Id == "" {
+				continue
+			}
+			results[i].Vector = core.Vector{Embeddings: sv.Embeddings, Metadata: sv.Metadata}
+		}
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Distance < results[j].Distance

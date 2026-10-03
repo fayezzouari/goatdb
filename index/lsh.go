@@ -74,11 +74,11 @@ func NewLSHIndex(dim, L, K int, metric core.DistanceMetric) *LSHIndex {
 
 // hashVec computes the K-bit bucket key for vector v in table t.
 // Each bit is the sign of the dot product with the corresponding hyperplane.
-// Uses core.DistSlices (AVX2 dispatch) for each dot product.
+// Uses core.Dot (AVX2 dispatch) for each dot product.
 func (l *LSHIndex) hashVec(t *lshTable, v []float32) uint64 {
 	var h uint64
 	for i, hp := range t.hyperplanes {
-		if core.DistSlices(v, hp, core.DotProduct) >= 0 {
+		if core.Dot(v, hp) >= 0 {
 			h |= 1 << uint(i)
 		}
 	}
