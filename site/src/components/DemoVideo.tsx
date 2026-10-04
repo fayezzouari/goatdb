@@ -1,14 +1,11 @@
-import { useState } from 'react'
 import { YOUTUBE_ID } from '../data.ts'
 import { Window } from './Window.tsx'
 
-// No player chrome: no control bar, keyboard shortcuts, fullscreen button,
-// annotations or related videos. Clicking the video still pauses and resumes it.
-const PLAYER_PARAMS = 'autoplay=1&controls=0&disablekb=1&fs=0&rel=0&iv_load_policy=3&playsinline=1'
+const BASE = import.meta.env.BASE_URL
 
-// YouTube loads only after the visitor presses play.
+// The MP4 lives on the site-assets branch and is copied into public/ at build
+// time, so it is served with the site but never ships in releases.
 export function DemoVideo() {
-  const [playing, setPlaying] = useState(false)
   return (
     <section id="demo" className="wrap">
       <h2>See it run in two and a half minutes</h2>
@@ -17,22 +14,10 @@ export function DemoVideo() {
         library. Also on <a href={`https://youtu.be/${YOUTUBE_ID}`}>YouTube</a>.
       </p>
       <Window title="goatdb demo" className="video">
-        <div className="frame">
-          {playing ? (
-            <iframe
-              src={`https://www.youtube-nocookie.com/embed/${YOUTUBE_ID}?${PLAYER_PARAMS}`}
-              title="goatdb demo"
-              allow="autoplay; encrypted-media"
-            />
-          ) : (
-            <img src={`${import.meta.env.BASE_URL}demo-poster.jpg`} alt="goatdb web UI showing search results for the movies collection" width={1280} height={720} />
-          )}
-        </div>
-        {!playing && (
-          <button className="playbtn" aria-label="Play the demo video (loads YouTube)" onClick={() => setPlaying(true)}>
-            <span><svg viewBox="0 0 24 24"><path d="M6 4l15 8-15 8z" /></svg></span>
-          </button>
-        )}
+        <video className="frame" controls preload="metadata" playsInline poster={`${BASE}demo-poster.jpg`}>
+          <source src={`${BASE}goatdb-demo.mp4`} type="video/mp4" />
+          Your browser can't play this video. <a href={`https://youtu.be/${YOUTUBE_ID}`}>Watch it on YouTube</a>.
+        </video>
       </Window>
     </section>
   )
