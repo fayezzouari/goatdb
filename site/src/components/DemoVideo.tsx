@@ -11,32 +11,51 @@ export function DemoVideo() {
   const ref = useRef<HTMLVideoElement>(null)
   const reduced = usePrefersReducedMotion()
 
-  // Start muted when at least half the video is on screen (browsers only allow
-  // muted autoplay) and pause when it scrolls away. Once the visitor pauses it
-  // themselves, leave it alone.
+  // Start muted when a quarter of the video is on screen (browsers only allow
+  // muted autoplay) and pause when it scrolls away. A pause only counts as the
+  // visitor's when they just clicked, tapped or pressed a key on the video;
+  // browsers also pause on their own (background tab, power saving, buffering).
   useEffect(() => {
     const video = ref.current!
     if (reduced) return
+    // React sets the muted property but not the attribute, which Safari checks
+    video.muted = true
+    video.defaultMuted = true
+    video.setAttribute('muted', '')
+
+    let visible = false
     let userPaused = false
-    let autoPausing = false
-    // the pause event fires asynchronously, so it consumes the flag itself
+    let lastInteraction = -Infinity
+    const interacted = () => { lastInteraction = performance.now() }
+    const tryPlay = () => { if (visible && !userPaused && video.paused) video.play().catch(() => {}) }
     const onPause = () => {
-      if (autoPausing) { autoPausing = false; return }
-      if (!video.ended) userPaused = true
+      if (performance.now() - lastInteraction < 1000 && !video.ended) userPaused = true
     }
     const onPlay = () => { userPaused = false }
+
+    video.addEventListener('pointerdown', interacted)
+    video.addEventListener('keydown', interacted)
     video.addEventListener('pause', onPause)
     video.addEventListener('play', onPlay)
+    video.addEventListener('canplay', tryPlay)
+    const onVisibility = () => { if (!document.hidden) tryPlay() }
+    document.addEventListener('visibilitychange', onVisibility)
+
     const io = new IntersectionObserver(([entry]) => {
-      if (userPaused) return
-      if (entry.isIntersecting) video.play().catch(() => {})
-      else if (!video.paused) { autoPausing = true; video.pause() }
-    }, { threshold: 0.5 })
+      visible = entry.isIntersecting
+      if (visible) tryPlay()
+      else if (!video.paused) video.pause()
+    }, { threshold: 0.25 })
     io.observe(video)
+
     return () => {
       io.disconnect()
+      document.removeEventListener('visibilitychange', onVisibility)
+      video.removeEventListener('pointerdown', interacted)
+      video.removeEventListener('keydown', interacted)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('play', onPlay)
+      video.removeEventListener('canplay', tryPlay)
     }
   }, [reduced])
 
