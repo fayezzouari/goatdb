@@ -2,6 +2,7 @@ package index
 
 import (
 	"math/bits"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -21,7 +22,10 @@ const (
 // transient second copy of the data (as append on a flat slice does), and
 // slices returned by at stay valid while the array grows.
 //
-// segArray does no locking; callers serialize grow against other calls.
+// at, one and len may run concurrently with grow: the directory is
+// published atomically and existing segments are never written by grow.
+// Callers serialize grow calls, and synchronize access to the elements
+// themselves.
 type segArray[T any] struct {
 	stride   int
 	baseBits uint
@@ -29,11 +33,12 @@ type segArray[T any] struct {
 	// lastDoubling is the index of the last doubling segment, which covers
 	// slots [1<<maxBits, 2<<maxBits).
 	lastDoubling int
-	segs         [][]T
-	slots        int
+	// dir is the list of segments. grow replaces it with a longer copy.
+	dir   atomic.Pointer[[][]T]
+	slots atomic.Int64
 }
 
-func newSegArray[T any](stride int) segArray[T] {
+func newSegArray[T any](stride int) *segArray[T] {
 	var zero T
 	slotBytes := stride * int(unsafe.Sizeof(zero))
 	maxBits := uint(segMaxBits)
@@ -44,12 +49,14 @@ func newSegArray[T any](stride int) segArray[T] {
 	if baseBits > maxBits {
 		baseBits = maxBits
 	}
-	return segArray[T]{
+	a := &segArray[T]{
 		stride:       stride,
 		baseBits:     baseBits,
 		maxBits:      maxBits,
 		lastDoubling: int(maxBits-baseBits) + 1,
 	}
+	a.dir.Store(new([][]T))
+	return a
 }
 
 // locate maps a slot to its segment and the slot's offset in that segment.
@@ -78,18 +85,26 @@ func (a *segArray[T]) segSlots(seg int) int {
 
 // grow makes slots [0, n) addressable. New slots are zero.
 func (a *segArray[T]) grow(n int) {
-	for a.slots < n {
-		k := len(a.segs)
-		size := a.segSlots(k)
-		a.segs = append(a.segs, make([]T, size*a.stride))
-		a.slots += size
+	slots := int(a.slots.Load())
+	if slots >= n {
+		return
 	}
+	old := *a.dir.Load()
+	segs := make([][]T, len(old), len(old)+4)
+	copy(segs, old)
+	for slots < n {
+		size := a.segSlots(len(segs))
+		segs = append(segs, make([]T, size*a.stride))
+		slots += size
+	}
+	a.dir.Store(&segs)
+	a.slots.Store(int64(slots))
 }
 
 // at returns the stride elements of slot. The slot must be below len.
 func (a *segArray[T]) at(slot int32) []T {
 	seg, off := a.locate(int(slot))
-	s := a.segs[seg]
+	s := (*a.dir.Load())[seg]
 	i := off * a.stride
 	return s[i : i+a.stride : i+a.stride]
 }
@@ -97,8 +112,8 @@ func (a *segArray[T]) at(slot int32) []T {
 // one returns a pointer to the single element of slot in a stride-1 array.
 func (a *segArray[T]) one(slot int32) *T {
 	seg, off := a.locate(int(slot))
-	return &a.segs[seg][off]
+	return &(*a.dir.Load())[seg][off]
 }
 
 // len returns the number of addressable slots.
-func (a *segArray[T]) len() int { return a.slots }
+func (a *segArray[T]) len() int { return int(a.slots.Load()) }
