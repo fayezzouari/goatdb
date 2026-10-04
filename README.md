@@ -2,7 +2,7 @@
 
 A vector database built from scratch in Go. Stores high-dimensional vectors with metadata, supports multiple approximate nearest neighbour index algorithms, and exposes a REST API over HTTP.
 
-**Website:** https://fayezzouari.github.io/goatdb · **Demo video:** https://youtu.be/pu9x9_9ALDQ
+**Demo video:** https://youtu.be/pu9x9_9ALDQ
 
 ---
 
