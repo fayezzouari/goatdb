@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/fetch-video.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "fetch-video": "git fetch --depth=1 origin site-assets && git show FETCH_HEAD:goatdb-demo.mp4 > public/goatdb-demo.mp4"
+    "fetch-video": "node scripts/fetch-video.mjs"
   },
   "dependencies": {
     "react": "^19.2.8",
