@@ -14,11 +14,11 @@ export const MOVIES: Movie[] = [
   { title: 'WALL-E', year: 2008, x: 0.5, y: 0.26 },
   { title: 'The Notebook', year: 2004, x: 0.1, y: 0.45 },
   { title: 'La La Land', year: 2016, x: 0.16, y: 0.25 },
-  { title: 'Mad Max: Fury Road', year: 2015, x: 0.9, y: 0.58 },
+  { title: 'Mad Max: Fury Road', year: 2015, x: 0.86, y: 0.5 },
   { title: 'Toy Story', year: 1995, x: 0.38, y: 0.14 },
   { title: 'Get Out', year: 2017, x: 0.36, y: 0.86 },
   { title: 'Planet Earth', year: 2006, x: 0.14, y: 0.74 },
-  { title: 'Die Hard', year: 1988, x: 0.66, y: 0.64 },
+  { title: 'Die Hard', year: 1988, x: 0.62, y: 0.7 },
 ]
 
 // SIFT-1M, HNSW M=16 efConstruction=200, measured for #35/#36.

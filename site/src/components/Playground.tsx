@@ -109,21 +109,19 @@ export function Playground() {
   }, [reduced])
 
   return (
-    <div className="play">
-      <Window title="Nearest-neighbour search over 12 movies">
-        <div className="play-grid">
-          <div className="map" ref={mapRef} role="img" aria-label="Map of movies placed by genre. Move the pointer to search for the closest ones.">
-            <canvas ref={canvasRef} />
-            <div className="hint" style={{ opacity: touched ? 0 : 1 }}>Move your pointer over the map. It is the query vector.</div>
-          </div>
-          <SearchJSON q={result.q} hits={result.hits} />
+    <>
+      <Window title="Live search over 12 movies">
+        <div className="map" ref={mapRef} role="img" aria-label="Map of movies placed by genre. Move the pointer to search for the closest ones.">
+          <canvas ref={canvasRef} />
+          <div className="hint" style={{ opacity: touched ? 0 : 1 }}>Move your pointer here. It is the query vector.</div>
         </div>
+        <Results q={result.q} hits={result.hits} />
       </Window>
       <p className="caption">
-        Each movie is a vector of genre scores. goatdb ranks them by distance to your query and returns the top 3 with
-        their metadata. Real embeddings have hundreds of dimensions; the search works the same way.
+        Each movie is a vector of genre scores, and goatdb returns the 3 closest to your query. Real embeddings have
+        hundreds of dimensions; the search works the same way.
       </p>
-    </div>
+    </>
   )
 }
 
@@ -131,21 +129,17 @@ const K = ({ children }: { children: string }) => <span className="k">"{children
 const S = ({ children }: { children: string }) => <span className="s">"{children}"</span>
 const N = ({ children }: { children: string | number }) => <span className="n">{children}</span>
 
-function SearchJSON({ q, hits }: { q: Point; hits: Hit[] }) {
+function Results({ q, hits }: { q: Point; hits: Hit[] }) {
   return (
-    <div className="json" aria-live="polite">
+    <div className="results" aria-live="polite">
       <span className="c">POST /collections/movies/search</span>{'\n'}
-      {'{ '}<K>embeddings</K>: <N>{`[${q.x.toFixed(2)}, ${q.y.toFixed(2)}]`}</N>, <K>top_k</K>: <N>{TOP_K}</N>{' }'}{'\n\n'}
-      <span className="c">200 OK</span>{'\n'}
-      {'{\n  '}<K>results</K>{': [\n'}
-      {hits.map((h, i) => (
+      {'{ '}<K>embeddings</K>: <N>{`[${q.x.toFixed(2)}, ${q.y.toFixed(2)}]`}</N>, <K>top_k</K>: <N>{TOP_K}</N>{' }'}{'\n'}
+      <span className="ok">200 OK</span>{'\n'}
+      {hits.map(h => (
         <span key={h.movie.title}>
-          {'    {\n      '}<K>id</K>: <S>{slug(h.movie.title)}</S>{',\n      '}
-          <K>distance</K>: <N>{h.distance.toFixed(4)}</N>{',\n      '}
-          <K>metadata</K>{': { '}<K>title</K>: <S>{h.movie.title}</S>{' }\n    }'}{i < hits.length - 1 ? ',' : ''}{'\n'}
+          {'{ '}<K>id</K>: <S>{slug(h.movie.title)}</S>, <K>distance</K>: <N>{h.distance.toFixed(4)}</N>{' }\n'}
         </span>
       ))}
-      {'  ]\n}'}
     </div>
   )
 }
