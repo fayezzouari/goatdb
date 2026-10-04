@@ -2,3 +2,4 @@ node_modules
 dist
 *.tsbuildinfo
 public/goatdb-demo.mp4
+public/goatdb-demo.mp4.part
