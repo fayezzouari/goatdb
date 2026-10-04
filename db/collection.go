@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fayezzouari/goatdb/core"
 	"github.com/fayezzouari/goatdb/storage"
@@ -27,7 +29,11 @@ type Collection struct {
 	index     core.Index
 	// opts holds the resolved index parameters. It is set once at creation.
 	opts CollectionOptions
-	mu   sync.RWMutex
+	// writeMu serializes writes. Inserts hold it with mu read-locked, so
+	// searches keep running while a batch is indexed; updates and deletes
+	// hold it with mu write-locked. Close takes mu for writing.
+	writeMu sync.Mutex
+	mu      sync.RWMutex
 }
 
 type CollectionInfo struct {
@@ -91,10 +97,44 @@ func (c *Collection) rebuildIndex() error {
 	if err != nil {
 		return err
 	}
-	for _, sv := range vectors {
-		c.index.AddVector(sv.Id, core.Vector{Embeddings: sv.Embeddings})
-	}
+	addToIndex(c.index, vectors)
 	return nil
+}
+
+// minVectorsPerWorker keeps small batches on one goroutine, where starting
+// workers would cost more than it saves.
+const minVectorsPerWorker = 64
+
+// addToIndex inserts vectors into idx, with up to GOMAXPROCS workers when
+// the index supports concurrent inserts.
+func addToIndex(idx core.Index, vectors []storage.StoredVector) {
+	workers := 1
+	if ca, ok := idx.(core.ConcurrentAdder); ok && ca.ConcurrentAdd() {
+		workers = min(runtime.GOMAXPROCS(0), len(vectors)/minVectorsPerWorker)
+	}
+	if workers <= 1 {
+		for _, v := range vectors {
+			idx.AddVector(v.Id, core.Vector{Embeddings: v.Embeddings})
+		}
+		return
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= len(vectors) {
+					return
+				}
+				v := vectors[i]
+				idx.AddVector(v.Id, core.Vector{Embeddings: v.Embeddings})
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (c *Collection) AddVector(ctx context.Context, id string, vector core.Vector) error {
@@ -104,8 +144,10 @@ func (c *Collection) AddVector(ctx context.Context, id string, vector core.Vecto
 	if len(vector.Embeddings) != c.dim {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(vector.Embeddings))
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	if err := c.store.Add(id, vector.Embeddings, vector.Metadata); err != nil {
 		return err
@@ -138,15 +180,17 @@ func (c *Collection) AddVectors(ctx context.Context, vectors []VectorEntry) erro
 		seen[v.Id] = struct{}{}
 		batch = append(batch, storage.StoredVector{Id: v.Id, Embeddings: v.Embeddings, Metadata: v.Metadata})
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	if err := c.store.AddBatch(batch); err != nil {
 		return err
 	}
-	for _, v := range batch {
-		c.index.AddVector(v.Id, core.Vector{Embeddings: v.Embeddings})
-	}
+	// The batch is durable; index it in parallel. Searches may run
+	// meanwhile and see part of the batch.
+	addToIndex(c.index, batch)
 	return nil
 }
 
@@ -171,6 +215,8 @@ func (c *Collection) UpdateVector(ctx context.Context, id string, vector core.Ve
 	if len(vector.Embeddings) != c.dim {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", c.dim, len(vector.Embeddings))
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -186,6 +232,8 @@ func (c *Collection) DeleteVector(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

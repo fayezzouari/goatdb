@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fayezzouari/goatdb/core"
 )
@@ -107,7 +108,7 @@ func (h *candMaxHeap) pop() candidate {
 
 // searchScratch holds the per-operation buffers used by searchLayer. One
 // scratch is taken from HNSWIndex.scratchPool for a whole Search or AddVector
-// call, so concurrent searches under the read lock never share one.
+// call, so concurrent operations never share one.
 type searchScratch struct {
 	// visited is indexed by slot. Only the entries listed in dirty are
 	// non-zero, and they are reset before searchLayer returns.
@@ -115,6 +116,8 @@ type searchScratch struct {
 	dirty   []int32
 	cands   candMinHeap
 	W       candMaxHeap
+	// nbs receives a copy of a node's links, taken under the node's lock.
+	nbs []int32
 	// result is the buffer searchLayer returns. It is overwritten by the
 	// next searchLayer call on the same scratch.
 	result []candidate
@@ -142,7 +145,24 @@ type searchScratch struct {
 //   - levels holds each node's top layer, or -1 for a free slot;
 //   - slotIDs maps slot to id, and ids maps id to slot.
 //
-// Deleted slots are recycled through free.
+// # Concurrency
+//
+// Searches and inserts run in parallel, as in hnswlib. They hold mu for
+// reading; deletes, Load and the codebook swap of Train hold it for writing.
+// Under the read lock:
+//
+//   - each node's link lists are guarded by its entry in locks; searches
+//     copy a list under the lock and compute distances outside it;
+//   - allocMu guards slot allocation and the growth of the slot arrays,
+//     which never moves existing slots;
+//   - entry holds the entry point and the top layer, updated under epMu;
+//   - idsMu guards ids;
+//   - a node's vector, codes, id and level are written once, under its
+//     lock, before any link to it is published, and stay unchanged while
+//     it is live, so they are read without locks.
+//
+// A deleted slot can still be reached through links left behind by the
+// delete, so an insert that recycles a free slot runs under the write lock.
 type HNSWIndex struct {
 	mu             sync.RWMutex
 	dim            int
@@ -157,28 +177,35 @@ type HNSWIndex struct {
 	distanceMetric core.DistanceMetric
 	metric         core.Metric
 
+	idsMu   sync.RWMutex
 	ids     map[string]int32
-	slotIDs segArray[string]
-	vecs    segArray[float32]
-	links0  segArray[int32]
-	upper   segArray[[]int32]
-	levels  segArray[int8]
+	slotIDs *segArray[string]
+	vecs    *segArray[float32]
+	links0  *segArray[int32]
+	upper   *segArray[[]int32]
+	levels  *segArray[int8]
+	locks   *segArray[sync.Mutex]
+
+	allocMu sync.Mutex
 	// nSlots is the number of slots handed out so far (live or free).
-	nSlots int
+	nSlots atomic.Int32
 	free   []int32
 
-	entrySlot int32
-	maxLayer  int
+	// entry packs the entry point slot (low 32 bits) and maxLayer+1 (high
+	// 32 bits); zero means an empty graph. Updates hold epMu.
+	epMu  sync.Mutex
+	entry atomic.Uint64
 
 	codebook *core.SQCodebook
 	// sq holds int8 codes for every slot while codebook is set.
 	sq *segArray[int8]
 	// trainMu serializes Train calls.
 	trainMu sync.Mutex
-	// training is set while Train quantizes vectors outside mu. AddVector
-	// then records the slots it writes in trainDirty, and Train re-quantizes
-	// them with the new codebook when it swaps the codebook in.
+	// training is set while Train quantizes vectors outside the write lock.
+	// AddVector then records the slots it writes in trainDirty, and Train
+	// re-quantizes them with the new codebook when it swaps the codebook in.
 	training   bool
+	dirtyMu    sync.Mutex
 	trainDirty []int32
 	// scratchPool reuses searchScratch buffers (visited array, heaps, result)
 	// across Search and AddVector calls. Flat array lookup is O(1) at ~2ns vs
@@ -203,7 +230,8 @@ func NewHNSWIndex(dim, M, efConstruction, ef int, metric core.DistanceMetric) *H
 	return h
 }
 
-// reset replaces the graph with an empty one sized for about n nodes.
+// reset replaces the graph with an empty one sized for about n nodes. The
+// caller must have exclusive access to h.
 func (h *HNSWIndex) reset(dim, M, n int) {
 	h.dim = dim
 	h.M = M
@@ -213,10 +241,10 @@ func (h *HNSWIndex) reset(dim, M, n int) {
 	h.links0 = newSegArray[int32](1 + 2*M)
 	h.upper = newSegArray[[]int32](1)
 	h.levels = newSegArray[int8](1)
-	h.nSlots = 0
+	h.locks = newSegArray[sync.Mutex](1)
+	h.nSlots.Store(0)
 	h.free = nil
-	h.entrySlot = 0
-	h.maxLayer = -1
+	h.entry.Store(0)
 	h.codebook = nil
 	h.sq = nil
 }
@@ -231,8 +259,8 @@ var testHookTrainChunk func()
 // Train builds a scalar quantization codebook from vectors and quantizes
 // every indexed vector with it. The codebook is built without any index
 // lock, and vectors are quantized in chunks under the read lock, so
-// searches keep running and inserts are only delayed by one chunk. The
-// write lock is held only to swap the new codebook in.
+// searches and inserts keep running. The write lock is held only to swap
+// the new codebook in.
 func (h *HNSWIndex) Train(vectors []core.Vector) {
 	h.trainMu.Lock()
 	defer h.trainMu.Unlock()
@@ -246,7 +274,7 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 	h.mu.Lock()
 	h.training = true
 	h.trainDirty = h.trainDirty[:0]
-	n := h.nSlots
+	n := int(h.nSlots.Load())
 	dim := h.dim
 	h.mu.Unlock()
 
@@ -261,9 +289,15 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 			return
 		}
 		for slot := int32(start); slot < int32(end); slot++ {
-			if *h.levels.one(slot) >= 0 {
+			// The slot may be one an insert is filling right now; its
+			// lock orders the two. A slot filled after this read is in
+			// trainDirty.
+			l := h.locks.one(slot)
+			l.Lock()
+			if h.level(slot) >= 0 {
 				quantizeInto(cb, sq.at(slot), h.vecs.at(slot))
 			}
+			l.Unlock()
 		}
 		h.mu.RUnlock()
 		if testHookTrainChunk != nil {
@@ -278,12 +312,12 @@ func (h *HNSWIndex) Train(vectors []core.Vector) {
 	}
 	// Slots written by AddVector after training started may hold vectors
 	// quantized from older data (or none at all); redo them.
-	sq.grow(h.nSlots)
+	sq.grow(int(h.nSlots.Load()))
 	for _, slot := range h.trainDirty {
 		quantizeInto(cb, sq.at(slot), h.vecs.at(slot))
 	}
 	h.codebook = cb
-	h.sq = &sq
+	h.sq = sq
 	h.training = false
 	h.trainDirty = nil
 }
@@ -310,7 +344,8 @@ func (h *HNSWIndex) level(slot int32) int {
 }
 
 // links returns the [count, links...] block of slot on layer. The node must
-// exist on that layer.
+// exist on that layer. Under the read lock, the block is guarded by the
+// node's lock.
 func (h *HNSWIndex) links(slot int32, layer int) []int32 {
 	if layer == 0 {
 		return h.links0.at(slot)
@@ -319,40 +354,73 @@ func (h *HNSWIndex) links(slot int32, layer int) []int32 {
 	return (*h.upper.one(slot))[off : off+h.M+1 : off+h.M+1]
 }
 
-// allocSlot returns a free slot, reusing deleted ones first, with every
-// per-slot array grown to cover it.
-func (h *HNSWIndex) allocSlot() int32 {
-	if n := len(h.free); n > 0 {
+// entryPoint returns the entry point and the top layer, which is -1 for an
+// empty graph.
+func (h *HNSWIndex) entryPoint() (slot int32, maxLayer int) {
+	e := h.entry.Load()
+	return int32(uint32(e)), int(e>>32) - 1
+}
+
+func (h *HNSWIndex) setEntryPoint(slot int32, maxLayer int) {
+	h.entry.Store(uint64(maxLayer+1)<<32 | uint64(uint32(slot)))
+}
+
+// copyLinks appends slot's links on layer to dst under the node's lock.
+func (h *HNSWIndex) copyLinks(dst []int32, slot int32, layer int) []int32 {
+	l := h.locks.one(slot)
+	l.Lock()
+	blk := h.links(slot, layer)
+	dst = append(dst, blk[1:1+blk[0]]...)
+	l.Unlock()
+	return dst
+}
+
+// allocSlot returns a slot with every per-slot array grown to cover it. With
+// reuse it returns a free slot if there is one, which requires the write
+// lock.
+func (h *HNSWIndex) allocSlot(reuse bool) int32 {
+	h.allocMu.Lock()
+	defer h.allocMu.Unlock()
+	if n := len(h.free); reuse && n > 0 {
 		slot := h.free[n-1]
 		h.free = h.free[:n-1]
 		return slot
 	}
-	slot := int32(h.nSlots)
-	h.nSlots++
-	if h.nSlots > h.vecs.len() {
-		h.vecs.grow(h.nSlots)
-		h.links0.grow(h.nSlots)
-		h.upper.grow(h.nSlots)
-		h.levels.grow(h.nSlots)
-		h.slotIDs.grow(h.nSlots)
+	slot := h.nSlots.Load()
+	n := int(slot) + 1
+	if n > h.vecs.len() {
+		h.vecs.grow(n)
+		h.links0.grow(n)
+		h.upper.grow(n)
+		h.levels.grow(n)
+		h.slotIDs.grow(n)
+		h.locks.grow(n)
 	}
-	if h.sq != nil && h.nSlots > h.sq.len() {
-		h.sq.grow(h.nSlots)
+	if h.sq != nil && n > h.sq.len() {
+		h.sq.grow(n)
 	}
+	h.nSlots.Store(int32(n))
 	return slot
 }
 
-// initNode fills a freshly allocated slot. The vector is copied and
-// prepared for the metric.
+func (h *HNSWIndex) hasFree() bool {
+	h.allocMu.Lock()
+	defer h.allocMu.Unlock()
+	return len(h.free) > 0
+}
+
+// initNode fills a newly allocated slot, which no other node links to yet
+// (or, for a recycled slot, while the write lock is held). The vector is
+// copied and prepared for the metric. The id is published last, so
+// GetVector never sees a half-written vector.
 func (h *HNSWIndex) initNode(slot int32, id string, emb []float32, level int) {
+	l := h.locks.one(slot)
+	l.Lock()
 	v := h.vecs.at(slot)
 	copy(v, emb[:h.dim])
 	h.metric.PrepareInPlace(v)
 	if h.codebook != nil {
 		quantizeInto(h.codebook, h.sq.at(slot), v)
-	}
-	if h.training {
-		h.trainDirty = append(h.trainDirty, slot)
 	}
 	*h.slotIDs.one(slot) = id
 	*h.levels.one(slot) = int8(level)
@@ -362,7 +430,16 @@ func (h *HNSWIndex) initNode(slot int32, id string, emb []float32, level int) {
 	} else {
 		*h.upper.one(slot) = nil
 	}
+	l.Unlock()
+
+	if h.training {
+		h.dirtyMu.Lock()
+		h.trainDirty = append(h.trainDirty, slot)
+		h.dirtyMu.Unlock()
+	}
+	h.idsMu.Lock()
 	h.ids[id] = slot
+	h.idsMu.Unlock()
 }
 
 func (h *HNSWIndex) slotDist(q []float32, qInt8 []int8, slot int32) float32 {
@@ -383,6 +460,14 @@ func (h *HNSWIndex) putScratch(s *searchScratch) {
 	h.scratchPool.Put(s)
 }
 
+// growVisited returns vb grown to cover slot, keeping its marks.
+func growVisited(vb []byte, slot int32) []byte {
+	n := int(slot) + 1
+	nb := make([]byte, n+n/2+64)
+	copy(nb, vb)
+	return nb
+}
+
 // searchLayer runs a greedy beam search on one layer and returns up to ef
 // candidates sorted by ascending distance.
 //
@@ -391,12 +476,11 @@ func (h *HNSWIndex) putScratch(s *searchScratch) {
 // entry points are copied into the heaps before s.result is rewritten.
 func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []int8, eps []candidate, ef, layer int) []candidate {
 	vb := s.visited
-	if len(vb) < h.nSlots {
+	if n := int(h.nSlots.Load()); len(vb) < n {
 		// Grow with headroom: sizing the buffer to exactly nSlots would
 		// reallocate it on every insert.
-		vb = make([]byte, h.nSlots+h.nSlots/2+64)
+		vb = make([]byte, n+n/2+64)
 	}
-	s.visited = vb
 	dirty := s.dirty[:0]
 	cands := s.cands[:0]
 	W := s.W[:0]
@@ -404,6 +488,9 @@ func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []i
 	for _, ep := range eps {
 		cands.push(ep)
 		W.push(ep)
+		if int(ep.slot) >= len(vb) {
+			vb = growVisited(vb, ep.slot)
+		}
 		if vb[ep.slot] == 0 {
 			vb[ep.slot] = 1
 			dirty = append(dirty, ep.slot)
@@ -418,8 +505,12 @@ func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []i
 		if layer > h.level(c.slot) {
 			continue
 		}
-		blk := h.links(c.slot, layer)
-		for _, nbSlot := range blk[1 : 1+blk[0]] {
+		s.nbs = h.copyLinks(s.nbs[:0], c.slot, layer)
+		for _, nbSlot := range s.nbs {
+			if int(nbSlot) >= len(vb) {
+				// Allocated by an insert that started after this search.
+				vb = growVisited(vb, nbSlot)
+			}
 			if vb[nbSlot] != 0 {
 				continue
 			}
@@ -454,6 +545,7 @@ func (h *HNSWIndex) searchLayer(s *searchScratch, query []float32, queryInt8 []i
 	for _, slot := range dirty {
 		vb[slot] = 0
 	}
+	s.visited = vb
 	s.dirty = dirty[:0]
 	s.cands = cands[:0]
 	s.W = W[:0]
@@ -512,10 +604,13 @@ func (h *HNSWIndex) selectNeighbors(candidates []candidate, M int, sel, discarde
 	return sel, discarded
 }
 
-// addLink adds a link from slot to newSlot on layer. When slot's list is
-// full (mMax links), the list plus newSlot is shrunk back to mMax entries
-// with the same heuristic as selectNeighbors.
+// addLink adds a link from slot to newSlot on layer, under slot's lock.
+// When slot's list is full (mMax links), the list plus newSlot is shrunk
+// back to mMax entries with the same heuristic as selectNeighbors.
 func (h *HNSWIndex) addLink(s *searchScratch, slot int32, layer, mMax int, newSlot int32) {
+	l := h.locks.one(slot)
+	l.Lock()
+	defer l.Unlock()
 	blk := h.links(slot, layer)
 	n := int(blk[0])
 	if n < mMax {
@@ -538,21 +633,36 @@ func (h *HNSWIndex) addLink(s *searchScratch, slot int32, layer, mMax int, newSl
 	s.pruneCands, s.pruneSel, s.pruneDiscrd = cands, sel, disc
 }
 
+// AddVector inserts a vector. It is safe to call concurrently with itself
+// and with every other method.
 func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	level := h.randomLevel()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	slot := h.allocSlot()
-	h.initNode(slot, id, vector.Embeddings, level)
-	q := h.vecs.at(slot)
-
-	if h.maxLayer == -1 {
-		h.entrySlot = slot
-		h.maxLayer = level
+	// Recycling a free slot needs the write lock (see HNSWIndex); fresh
+	// slots are filled under the read lock, in parallel with other calls.
+	if h.hasFree() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.insert(h.allocSlot(true), id, vector.Embeddings, level)
 		return
 	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	h.insert(h.allocSlot(false), id, vector.Embeddings, level)
+}
+
+func (h *HNSWIndex) insert(slot int32, id string, emb []float32, level int) {
+	h.initNode(slot, id, emb, level)
+	q := h.vecs.at(slot)
+
+	h.epMu.Lock()
+	entry, maxLayer := h.entryPoint()
+	if maxLayer == -1 {
+		h.setEntryPoint(slot, level)
+		h.epMu.Unlock()
+		return
+	}
+	h.epMu.Unlock()
 
 	var qInt8 []int8
 	if h.codebook != nil {
@@ -562,19 +672,16 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 	s := h.getScratch()
 	defer h.putScratch(s)
 
-	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	ep := append(s.ep[:0], candidate{entry, h.slotDist(q, qInt8, entry)})
 	s.ep = ep
 
-	for layer := h.maxLayer; layer > level; layer-- {
+	for layer := maxLayer; layer > level; layer-- {
 		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
 
-	for layer := min(level, h.maxLayer); layer >= 0; layer-- {
-		mMax := h.M
-		if layer == 0 {
-			mMax = h.M * 2
-		}
+	top := min(level, maxLayer)
+	for layer := top; layer >= 0; layer-- {
 		// candidates aliases s.result; it is fully consumed (and reused as
 		// the next layer's entry points) before searchLayer runs again.
 		candidates := h.searchLayer(s, q, qInt8, ep, h.efConstruction, layer)
@@ -591,27 +698,51 @@ func (h *HNSWIndex) AddVector(id string, vector core.Vector) {
 		// on every layer; back-links can grow its list up to mMax.
 		neighbors, disc := h.selectNeighbors(candidates, h.M, s.selected, s.discarded)
 		s.selected, s.discarded = neighbors, disc
+		l := h.locks.one(slot)
+		l.Lock()
 		blk := h.links(slot, layer)
 		for i, nb := range neighbors {
 			blk[1+i] = nb.slot
 		}
 		blk[0] = int32(len(neighbors))
-		for _, nb := range neighbors {
-			h.addLink(s, nb.slot, layer, mMax, slot)
-		}
+		l.Unlock()
 		ep = candidates
+		if len(ep) == 0 {
+			break
+		}
 	}
 
-	if level > h.maxLayer {
-		h.maxLayer = level
-		h.entrySlot = slot
+	// Publish the node bottom-up: once another search can reach it on a
+	// layer, its links on every layer below are already in place, so a
+	// search descending through it never lands on an unlinked node. Until
+	// its back-links on a layer exist nobody else links to it there, so its
+	// own list on that layer is still exactly the selection above.
+	for layer := 0; layer <= top; layer++ {
+		mMax := h.M
+		if layer == 0 {
+			mMax = h.M * 2
+		}
+		s.nbs = h.copyLinks(s.nbs[:0], slot, layer)
+		for _, nb := range s.nbs {
+			h.addLink(s, nb, layer, mMax, slot)
+		}
+	}
+
+	if level > maxLayer {
+		h.epMu.Lock()
+		if _, cur := h.entryPoint(); level > cur {
+			h.setEntryPoint(slot, level)
+		}
+		h.epMu.Unlock()
 	}
 }
 
 func (h *HNSWIndex) GetVector(id string) (core.Vector, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	h.idsMu.RLock()
 	slot, ok := h.ids[id]
+	h.idsMu.RUnlock()
 	if !ok {
 		return core.Vector{}, false
 	}
@@ -651,17 +782,19 @@ func (h *HNSWIndex) DeleteVector(id string) bool {
 	*h.upper.one(slot) = nil
 	*h.slotIDs.one(slot) = ""
 	h.links0.at(slot)[0] = 0
+	h.allocMu.Lock()
 	h.free = append(h.free, slot)
+	h.allocMu.Unlock()
 	delete(h.ids, id)
 
-	if h.entrySlot == slot {
-		h.maxLayer = -1
+	if entry, _ := h.entryPoint(); entry == slot {
+		newEntry, maxLayer := int32(0), -1
 		for _, s := range h.ids {
-			if lvl := h.level(s); lvl > h.maxLayer {
-				h.maxLayer = lvl
-				h.entrySlot = s
+			if lvl := h.level(s); lvl > maxLayer {
+				newEntry, maxLayer = s, lvl
 			}
 		}
+		h.setEntryPoint(newEntry, maxLayer)
 	}
 	return true
 }
@@ -675,7 +808,8 @@ func (h *HNSWIndex) Search(query core.Vector, topK int) []core.SearchResult {
 func (h *HNSWIndex) SearchEf(query core.Vector, topK, ef int) []core.SearchResult {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.maxLayer == -1 {
+	entry, maxLayer := h.entryPoint()
+	if maxLayer == -1 {
 		return nil
 	}
 
@@ -688,10 +822,10 @@ func (h *HNSWIndex) SearchEf(query core.Vector, topK, ef int) []core.SearchResul
 	s := h.getScratch()
 	defer h.putScratch(s)
 
-	ep := append(s.ep[:0], candidate{h.entrySlot, h.slotDist(q, qInt8, h.entrySlot)})
+	ep := append(s.ep[:0], candidate{entry, h.slotDist(q, qInt8, entry)})
 	s.ep = ep
 
-	for layer := h.maxLayer; layer > 0; layer-- {
+	for layer := maxLayer; layer > 0; layer-- {
 		result := h.searchLayer(s, q, qInt8, ep, 1, layer)
 		ep = result[:1]
 	}
@@ -717,3 +851,7 @@ func (h *HNSWIndex) SearchEf(query core.Vector, topK, ef int) []core.SearchResul
 	}
 	return results
 }
+
+// ConcurrentAdd reports that AddVector calls may run in parallel and scale
+// with the number of cores.
+func (h *HNSWIndex) ConcurrentAdd() bool { return true }

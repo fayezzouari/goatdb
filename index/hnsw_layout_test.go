@@ -28,7 +28,7 @@ func checkGraph(t *testing.T, h *HNSWIndex) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	live := 0
-	for slot := int32(0); slot < int32(h.nSlots); slot++ {
+	for slot := int32(0); slot < h.nSlots.Load(); slot++ {
 		lvl := h.level(slot)
 		if lvl < 0 {
 			continue
@@ -51,7 +51,7 @@ func checkGraph(t *testing.T, h *HNSWIndex) {
 				if nb == slot {
 					t.Fatalf("slot %d layer %d: self link", slot, layer)
 				}
-				if int(nb) >= h.nSlots {
+				if nb >= h.nSlots.Load() {
 					t.Fatalf("slot %d layer %d: link %d out of range", slot, layer, nb)
 				}
 			}
@@ -60,8 +60,8 @@ func checkGraph(t *testing.T, h *HNSWIndex) {
 	if live != len(h.ids) {
 		t.Fatalf("%d live slots, %d ids", live, len(h.ids))
 	}
-	if live > 0 && h.level(h.entrySlot) != h.maxLayer {
-		t.Fatalf("entry slot %d has level %d, maxLayer %d", h.entrySlot, h.level(h.entrySlot), h.maxLayer)
+	if entry, maxLayer := h.entryPoint(); live > 0 && h.level(entry) != maxLayer {
+		t.Fatalf("entry slot %d has level %d, maxLayer %d", entry, h.level(entry), maxLayer)
 	}
 }
 
@@ -80,13 +80,13 @@ func TestHNSWDeleteReuseSlots(t *testing.T) {
 			t.Fatalf("delete v%d failed", i)
 		}
 	}
-	slotsBefore := h.nSlots
+	slotsBefore := h.nSlots.Load()
 	fresh := randVecs(r, 300, dim)
 	for i, v := range fresh {
 		h.AddVector(fmt.Sprintf("n%d", i), v)
 	}
-	if h.nSlots != slotsBefore {
-		t.Errorf("slots grew from %d to %d; freed slots were not reused", slotsBefore, h.nSlots)
+	if h.nSlots.Load() != slotsBefore {
+		t.Errorf("slots grew from %d to %d; freed slots were not reused", slotsBefore, h.nSlots.Load())
 	}
 	checkGraph(t, h)
 	for i := 0; i < len(vecs); i += 2 {
@@ -139,13 +139,13 @@ func TestHNSWSaveLoadRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkGraph(t, h2)
-			if h2.nSlots != h.nSlots || len(h2.free) != len(h.free) || h2.M != 8 || h2.ef != 50 || h2.distanceMetric != metric {
-				t.Fatalf("loaded index differs: slots %d/%d free %d/%d", h2.nSlots, h.nSlots, len(h2.free), len(h.free))
+			if h2.nSlots.Load() != h.nSlots.Load() || len(h2.free) != len(h.free) || h2.M != 8 || h2.ef != 50 || h2.distanceMetric != metric {
+				t.Fatalf("loaded index differs: slots %d/%d free %d/%d", h2.nSlots.Load(), h.nSlots.Load(), len(h2.free), len(h.free))
 			}
 			if h2.codebook == nil || *h2.codebook != *h.codebook {
 				t.Fatal("codebook not restored")
 			}
-			for slot := int32(0); slot < int32(h.nSlots); slot++ {
+			for slot := int32(0); slot < h.nSlots.Load(); slot++ {
 				if h.level(slot) != h2.level(slot) {
 					t.Fatalf("slot %d: level %d != %d", slot, h.level(slot), h2.level(slot))
 				}
@@ -195,11 +195,12 @@ func TestHNSWLoadLegacyGob(t *testing.T) {
 		}
 		nodes[id] = hnswNodeState{Embeddings: append([]float32(nil), h.vecs.at(slot)...), Connections: conns}
 	}
+	entry, maxLayer := h.entryPoint()
 	state := hnswState{
 		Dim: dim, M: 6, EfConstruction: 40, Ef: 40, ML: h.mL,
 		DistanceMetric: core.Cosine,
-		EntryPoint:     *h.slotIDs.one(h.entrySlot),
-		MaxLayer:       h.maxLayer,
+		EntryPoint:     *h.slotIDs.one(entry),
+		MaxLayer:       maxLayer,
 		Nodes:          nodes,
 		Normalized:     true,
 	}
@@ -218,8 +219,8 @@ func TestHNSWLoadLegacyGob(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkGraph(t, h2)
-	if h2.maxLayer != h.maxLayer || len(h2.ids) != len(h.ids) {
-		t.Fatalf("maxLayer %d/%d ids %d/%d", h2.maxLayer, h.maxLayer, len(h2.ids), len(h.ids))
+	if _, ml2 := h2.entryPoint(); ml2 != maxLayer || len(h2.ids) != len(h.ids) {
+		t.Fatalf("maxLayer %d/%d ids %d/%d", ml2, maxLayer, len(h2.ids), len(h.ids))
 	}
 	for i, v := range vecs[:100] {
 		a, b := h.Search(v, 5), h2.Search(v, 5)

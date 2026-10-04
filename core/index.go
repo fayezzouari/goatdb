@@ -23,3 +23,10 @@ type Trainable interface {
 type EfSearcher interface {
 	SearchEf(query Vector, topK, ef int) []SearchResult
 }
+
+// ConcurrentAdder is implemented by indexes whose AddVector may be called
+// from several goroutines at once and scales with them. Callers may insert
+// a batch into such an index in parallel.
+type ConcurrentAdder interface {
+	ConcurrentAdd() bool
+}

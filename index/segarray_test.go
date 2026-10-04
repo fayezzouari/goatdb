@@ -18,12 +18,13 @@ func TestSegArrayLocate(t *testing.T) {
 		prevSeg, prevOff := 0, -1
 		for slot := 0; slot < a.len(); slot++ {
 			seg, off := a.locate(slot)
-			if seg >= len(a.segs) || (off+1)*stride > len(a.segs[seg]) {
+			segs := *a.dir.Load()
+			if seg >= len(segs) || (off+1)*stride > len(segs[seg]) {
 				t.Fatalf("stride %d slot %d: out of bounds (seg %d off %d)", stride, slot, seg, off)
 			}
 			switch {
 			case seg == prevSeg && off == prevOff+1:
-			case seg == prevSeg+1 && off == 0 && (prevOff+1)*stride == len(a.segs[prevSeg]):
+			case seg == prevSeg+1 && off == 0 && (prevOff+1)*stride == len(segs[prevSeg]):
 			default:
 				t.Fatalf("stride %d slot %d: got seg %d off %d after seg %d off %d", stride, slot, seg, off, prevSeg, prevOff)
 			}
