@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "fetch-video": "git fetch --depth=1 origin site-assets && git show FETCH_HEAD:goatdb-demo.mp4 > public/goatdb-demo.mp4"
   },
   "dependencies": {
     "react": "^19.2.8",

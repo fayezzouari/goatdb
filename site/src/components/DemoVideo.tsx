@@ -1,14 +1,45 @@
-import { useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { YOUTUBE_ID } from '../data.ts'
+import { usePrefersReducedMotion } from '../hooks.ts'
 import { Window } from './Window.tsx'
 
-// No player chrome: no control bar, keyboard shortcuts, fullscreen button,
-// annotations or related videos. Clicking the video still pauses and resumes it.
-const PLAYER_PARAMS = 'autoplay=1&controls=0&disablekb=1&fs=0&rel=0&iv_load_policy=3&playsinline=1'
+const BASE = import.meta.env.BASE_URL
 
-// YouTube loads only after the visitor presses play.
+// The MP4 lives on the site-assets branch and is copied into public/ at build
+// time, so it is served with the site but never ships in releases.
 export function DemoVideo() {
-  const [playing, setPlaying] = useState(false)
+  const ref = useRef<HTMLVideoElement>(null)
+  const reduced = usePrefersReducedMotion()
+
+  // Start muted when at least half the video is on screen (browsers only allow
+  // muted autoplay) and pause when it scrolls away. Once the visitor pauses it
+  // themselves, leave it alone.
+  useEffect(() => {
+    const video = ref.current!
+    if (reduced) return
+    let userPaused = false
+    let autoPausing = false
+    // the pause event fires asynchronously, so it consumes the flag itself
+    const onPause = () => {
+      if (autoPausing) { autoPausing = false; return }
+      if (!video.ended) userPaused = true
+    }
+    const onPlay = () => { userPaused = false }
+    video.addEventListener('pause', onPause)
+    video.addEventListener('play', onPlay)
+    const io = new IntersectionObserver(([entry]) => {
+      if (userPaused) return
+      if (entry.isIntersecting) video.play().catch(() => {})
+      else if (!video.paused) { autoPausing = true; video.pause() }
+    }, { threshold: 0.5 })
+    io.observe(video)
+    return () => {
+      io.disconnect()
+      video.removeEventListener('pause', onPause)
+      video.removeEventListener('play', onPlay)
+    }
+  }, [reduced])
+
   return (
     <section id="demo" className="wrap">
       <h2>See it run in two and a half minutes</h2>
@@ -17,22 +48,10 @@ export function DemoVideo() {
         library. Also on <a href={`https://youtu.be/${YOUTUBE_ID}`}>YouTube</a>.
       </p>
       <Window title="goatdb demo" className="video">
-        <div className="frame">
-          {playing ? (
-            <iframe
-              src={`https://www.youtube-nocookie.com/embed/${YOUTUBE_ID}?${PLAYER_PARAMS}`}
-              title="goatdb demo"
-              allow="autoplay; encrypted-media"
-            />
-          ) : (
-            <img src={`${import.meta.env.BASE_URL}demo-poster.jpg`} alt="goatdb web UI showing search results for the movies collection" width={1280} height={720} />
-          )}
-        </div>
-        {!playing && (
-          <button className="playbtn" aria-label="Play the demo video (loads YouTube)" onClick={() => setPlaying(true)}>
-            <span><svg viewBox="0 0 24 24"><path d="M6 4l15 8-15 8z" /></svg></span>
-          </button>
-        )}
+        <video ref={ref} className="frame" controls muted playsInline preload="metadata" poster={`${BASE}demo-poster.jpg`}>
+          <source src={`${BASE}goatdb-demo.mp4`} type="video/mp4" />
+          Your browser can't play this video. <a href={`https://youtu.be/${YOUTUBE_ID}`}>Watch it on YouTube</a>.
+        </video>
       </Window>
     </section>
   )
