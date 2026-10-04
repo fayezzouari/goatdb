@@ -44,7 +44,7 @@ export function Playground() {
     const draw = (t: number) => {
       const q = query.current, hits = nearest(q)
       ctx.clearRect(0, 0, W, H)
-      ctx.strokeStyle = 'rgba(255,255,255,.04)'; ctx.lineWidth = 1
+      ctx.strokeStyle = 'rgba(255,255,255,.035)'; ctx.lineWidth = 1
       for (let i = 1; i < 8; i++) { const x = (i * W) / 8; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke() }
       for (let i = 1; i < 6; i++) { const y = (i * H) / 6; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
 
@@ -61,9 +61,9 @@ export function Playground() {
       for (const m of MOVIES) {
         const [x, y] = P(m.x, m.y), rank = hits.findIndex(h => h.movie === m)
         ctx.beginPath(); ctx.arc(x, y, rank >= 0 ? 7 : 5, 0, Math.PI * 2)
-        ctx.fillStyle = rank >= 0 ? RANK_COLORS[rank] : '#3b4560'; ctx.fill()
+        ctx.fillStyle = rank >= 0 ? RANK_COLORS[rank] : '#4a4a52'; ctx.fill()
         if (rank >= 0) { ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2; ctx.stroke() }
-        ctx.fillStyle = rank >= 0 ? '#f6f3ff' : '#7d88a3'
+        ctx.fillStyle = rank >= 0 ? '#f4f4f5' : '#8a8a93'
         const tw = ctx.measureText(m.title).width
         ctx.fillText(m.title, x + 11 + tw > W - 6 ? x - 11 - tw : x + 11, y + 4)
       }
