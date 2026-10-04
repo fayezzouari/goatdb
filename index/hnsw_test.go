@@ -283,9 +283,9 @@ func checkSQCodes(t *testing.T, h *HNSWIndex) {
 	if h.codebook == nil {
 		t.Fatal("expected a codebook after Train")
 	}
-	for id, node := range h.nodes {
-		want := h.codebook.Quantize(h.pool.Get(node.poolIdx))
-		got := h.sqPool.Get(node.poolIdx)
+	for id, slot := range h.ids {
+		want := h.codebook.Quantize(h.vecs.at(slot))
+		got := h.sq.at(slot)
 		for i := range want {
 			if got[i] != want[i] {
 				t.Fatalf("vector %s: stale int8 code at dim %d", id, i)
