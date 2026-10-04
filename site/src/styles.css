@@ -25,24 +25,10 @@
   :focus-visible { outline: 3px solid var(--lagoon); outline-offset: 3px; border-radius: 6px; }
   ::selection { background: var(--pink); color: #fff; }
 
-  /* background: charcoal with soft grey light, a dot grid, heavy film grain and a vignette */
-  .field { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; background: #0a0a0b; }
-  .blob { position: absolute; border-radius: 50%; filter: blur(90px); will-change: transform; }
-  .b1 { width: 58vw; height: 58vw; background: radial-gradient(circle, #3a3a40 0%, transparent 68%); left: -16vw; top: -24vw; opacity: .9; animation: d1 30s ease-in-out infinite alternate; }
-  .b2 { width: 52vw; height: 52vw; background: radial-gradient(circle, #2e2e34 0%, transparent 68%); right: -14vw; top: -10vw; opacity: .85; animation: d2 34s ease-in-out infinite alternate; }
-  .b3 { width: 44vw; height: 44vw; background: radial-gradient(circle, #26262b 0%, transparent 68%); left: -6vw; top: 58vh; opacity: .8; animation: d3 38s ease-in-out infinite alternate; }
-  .b4 { width: 48vw; height: 48vw; background: radial-gradient(circle, #2a2a2f 0%, transparent 68%); right: -12vw; top: 62vh; opacity: .8; animation: d4 32s ease-in-out infinite alternate; }
-  .field::before { content: ""; position: absolute; inset: 0; z-index: 1;
-    background-image: radial-gradient(rgba(255, 255, 255, .16) 1px, transparent 1.5px); background-size: 24px 24px;
-    -webkit-mask-image: radial-gradient(ellipse 85% 75% at 50% 30%, #000 25%, transparent 90%);
-            mask-image: radial-gradient(ellipse 85% 75% at 50% 30%, #000 25%, transparent 90%); }
-  .field::after { content: ""; position: absolute; inset: 0; z-index: 2; opacity: .55; mix-blend-mode: soft-light;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
-  .vignette { position: absolute; inset: 0; z-index: 3; background: radial-gradient(ellipse 120% 90% at 50% 25%, transparent 45%, rgba(0, 0, 0, .7) 100%); }
-  @keyframes d1 { to { transform: translate(14vw, 8vw); } }
-  @keyframes d2 { to { transform: translate(-12vw, 10vw); } }
-  @keyframes d3 { to { transform: translate(16vw, -10vw); } }
-  @keyframes d4 { to { transform: translate(-14vw, -12vw); } }
+  /* background: a pixel world from space (hero) through clouds and mountains to the ground (footer) */
+  .pixel-bg { position: fixed; top: 0; left: 0; width: 100vw; z-index: -1; pointer-events: none;
+              image-rendering: pixelated; will-change: transform; }
+  body { background: #060608; }
 
   .wrap { width: min(var(--wrap), 100% - 32px); margin-inline: auto; }
 
@@ -171,7 +157,7 @@
   footer { margin-top: 140px; color: var(--faint); font-size: 15px; }
   .goat { display: block; width: clamp(240px, 40vw, 480px); height: auto; margin: 0 auto; image-rendering: pixelated;
           filter: drop-shadow(0 24px 40px rgba(0, 0, 0, .6)); }
-  .foot-row { display: flex; flex-wrap: wrap; gap: 18px 40px; justify-content: space-between; padding: 40px 0 56px; border-top: 1px solid var(--line); }
+  .foot-row { display: flex; flex-wrap: wrap; gap: 18px 40px; justify-content: space-between; padding: 40px 0 56px; }
   footer .brand { color: var(--ink); }
   footer a { color: var(--muted); }
 
@@ -189,7 +175,6 @@
     section { padding-top: 84px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .blob { animation: none; }
     .hero-copy > *, .hero-demo { animation: none; }
     .chart .curve { stroke-dasharray: none; stroke-dashoffset: 0; }
     .chart .pt, .chart .lbl { opacity: 1; }
