@@ -76,8 +76,10 @@ type hnswHeader struct {
 }
 
 func (h *HNSWIndex) Save(path string) error {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	// The write lock keeps inserts, which run under the read lock, from
+	// changing the graph while it is written.
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	file, err := os.Create(path)
 	if err != nil {
 		return err
@@ -100,15 +102,17 @@ func (h *HNSWIndex) writeTo(w *bufio.Writer) error {
 	metric := []byte(h.distanceMetric)
 	putUvarint(w, uint64(len(metric)))
 	w.Write(metric)
+	entry, maxLayer := h.entryPoint()
+	nSlots := int(h.nSlots.Load())
 	hdr := hnswHeader{
 		Dim:            uint32(h.dim),
 		M:              uint32(h.M),
 		EfConstruction: uint32(h.efConstruction),
 		Ef:             uint32(h.ef),
 		ML:             h.mL,
-		MaxLayer:       int32(h.maxLayer),
-		EntrySlot:      h.entrySlot,
-		NSlots:         uint32(h.nSlots),
+		MaxLayer:       int32(maxLayer),
+		EntrySlot:      entry,
+		NSlots:         uint32(nSlots),
 	}
 	if h.codebook != nil {
 		hdr.HasSQ = 1
@@ -119,7 +123,7 @@ func (h *HNSWIndex) writeTo(w *bufio.Writer) error {
 		return err
 	}
 	var buf [4]byte
-	for slot := int32(0); slot < int32(h.nSlots); slot++ {
+	for slot := int32(0); slot < int32(nSlots); slot++ {
 		level := h.level(slot)
 		w.WriteByte(byte(int8(level)))
 		if level < 0 {
@@ -186,10 +190,13 @@ func (h *HNSWIndex) Load(path string) error {
 	h.links0 = n.links0
 	h.upper = n.upper
 	h.levels = n.levels
-	h.nSlots = n.nSlots
+	h.locks = n.locks
+	h.nSlots.Store(n.nSlots.Load())
+	// hasFree reads free without holding mu.
+	h.allocMu.Lock()
 	h.free = n.free
-	h.entrySlot = n.entrySlot
-	h.maxLayer = n.maxLayer
+	h.allocMu.Unlock()
+	h.entry.Store(n.entry.Load())
 	h.codebook = n.codebook
 	h.sq = n.sq
 	// Abandon any Train in progress: its slots refer to the old graph.
@@ -241,9 +248,11 @@ func (h *HNSWIndex) readFrom(r *bufio.Reader) error {
 	h.upper.grow(nSlots)
 	h.levels.grow(nSlots)
 	h.slotIDs.grow(nSlots)
-	h.nSlots = nSlots
-	h.maxLayer = int(hdr.MaxLayer)
-	h.entrySlot = hdr.EntrySlot
+	h.locks.grow(nSlots)
+	h.nSlots.Store(int32(nSlots))
+	if hdr.MaxLayer >= 0 {
+		h.setEntryPoint(hdr.EntrySlot, int(hdr.MaxLayer))
+	}
 
 	vbuf := make([]byte, 4*h.dim)
 	var idBuf []byte
@@ -308,7 +317,7 @@ func (h *HNSWIndex) readFrom(r *bufio.Reader) error {
 			blk[0] = int32(cnt)
 		}
 	}
-	if h.maxLayer >= 0 && h.level(h.entrySlot) != h.maxLayer {
+	if entry, maxLayer := h.entryPoint(); maxLayer >= 0 && h.level(entry) != maxLayer {
 		return errHNSWCorrupt
 	}
 	if hdr.HasSQ != 0 {
@@ -327,14 +336,15 @@ func slicesGrow(b []byte, n int) []byte {
 // setCodebook installs cb and quantizes every live vector with it.
 func (h *HNSWIndex) setCodebook(cb *core.SQCodebook) {
 	sq := newSegArray[int8](h.dim)
-	sq.grow(h.nSlots)
-	for slot := int32(0); slot < int32(h.nSlots); slot++ {
+	nSlots := int(h.nSlots.Load())
+	sq.grow(nSlots)
+	for slot := int32(0); slot < int32(nSlots); slot++ {
 		if h.level(slot) >= 0 {
 			quantizeInto(cb, sq.at(slot), h.vecs.at(slot))
 		}
 	}
 	h.codebook = cb
-	h.sq = &sq
+	h.sq = sq
 }
 
 // readLegacy loads the version 1 gob format.
@@ -357,7 +367,7 @@ func (h *HNSWIndex) readLegacy(r io.Reader) error {
 		if len(ns.Embeddings) != s.Dim || len(ns.Connections) == 0 || len(ns.Connections) > hnswMaxLevel+1 {
 			return errHNSWCorrupt
 		}
-		slot := h.allocSlot()
+		slot := h.allocSlot(false)
 		level := len(ns.Connections) - 1
 		h.initNode(slot, id, ns.Embeddings, level)
 		if s.Normalized {
@@ -384,15 +394,15 @@ func (h *HNSWIndex) readLegacy(r io.Reader) error {
 		}
 	}
 	if ep, ok := h.ids[s.EntryPoint]; ok {
-		h.entrySlot = ep
-		h.maxLayer = h.level(ep)
+		h.setEntryPoint(ep, h.level(ep))
 	} else {
+		entry, maxLayer := int32(0), -1
 		for _, slot := range h.ids {
-			if lvl := h.level(slot); lvl > h.maxLayer {
-				h.maxLayer = lvl
-				h.entrySlot = slot
+			if lvl := h.level(slot); lvl > maxLayer {
+				entry, maxLayer = slot, lvl
 			}
 		}
+		h.setEntryPoint(entry, maxLayer)
 	}
 
 	if s.HasSQ {
