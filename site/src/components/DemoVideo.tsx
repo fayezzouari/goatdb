@@ -2,6 +2,10 @@ import { useState } from 'react'
 import { YOUTUBE_ID } from '../data.ts'
 import { Window } from './Window.tsx'
 
+// No player chrome: no control bar, keyboard shortcuts, fullscreen button,
+// annotations or related videos. Clicking the video still pauses and resumes it.
+const PLAYER_PARAMS = 'autoplay=1&controls=0&disablekb=1&fs=0&rel=0&iv_load_policy=3&playsinline=1'
+
 // YouTube loads only after the visitor presses play.
 export function DemoVideo() {
   const [playing, setPlaying] = useState(false)
@@ -16,9 +20,9 @@ export function DemoVideo() {
         <div className="frame">
           {playing ? (
             <iframe
-              src={`https://www.youtube-nocookie.com/embed/${YOUTUBE_ID}?autoplay=1&rel=0&modestbranding=1`}
+              src={`https://www.youtube-nocookie.com/embed/${YOUTUBE_ID}?${PLAYER_PARAMS}`}
               title="goatdb demo"
-              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+              allow="autoplay; encrypted-media"
             />
           ) : (
             <img src={`${import.meta.env.BASE_URL}demo-poster.jpg`} alt="goatdb web UI showing search results for the movies collection" width={1280} height={720} />
