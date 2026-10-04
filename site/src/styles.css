@@ -168,7 +168,10 @@
   pre .c { color: #6c7a96; } pre .p { color: var(--pink); user-select: none; } pre .s { color: #a5e07a; } pre .k { color: #ff79c6; } pre .t { color: #79b8ff; } pre .n { color: #ffb86c; }
   .panel .copy { position: absolute; top: 5px; right: 10px; padding: 7px 11px; font-size: 13px; }
 
-  footer { margin-top: 130px; padding: 40px 0 56px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 18px 40px; justify-content: space-between; color: var(--faint); font-size: 15px; }
+  footer { margin-top: 140px; color: var(--faint); font-size: 15px; }
+  .goat { display: block; width: clamp(260px, 44vw, 520px); height: auto; margin: 0 auto -8px;
+          filter: drop-shadow(0 30px 60px rgba(0, 0, 0, .6)); }
+  .foot-row { display: flex; flex-wrap: wrap; gap: 18px 40px; justify-content: space-between; padding: 40px 0 56px; border-top: 1px solid var(--line); }
   footer .brand { color: var(--ink); }
   footer a { color: var(--muted); }
 
