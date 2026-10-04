@@ -47,8 +47,9 @@
   /* nav */
   nav { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
   .brand { font: 800 22px/1 var(--display); letter-spacing: -.5px; text-decoration: none; }
-  nav ul { display: flex; gap: 26px; list-style: none; font-size: 16px; }
-  nav ul a { text-decoration: none; color: var(--muted); transition: color .2s; }
+  nav ul { display: flex; align-items: center; gap: 26px; list-style: none; font-size: 16px; line-height: 1; }
+  nav ul li { display: flex; }
+  nav ul a { display: inline-flex; align-items: center; text-decoration: none; color: var(--muted); transition: color .2s; }
   nav ul a:hover { color: var(--ink); }
   .gh { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink) !important; background: rgba(255,255,255,.06); }
   .gh svg { width: 17px; height: 17px; }
